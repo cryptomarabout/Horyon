@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="web/public/horyon_social_preview.png" alt="Horyon — personal crypto-intelligence system" width="820">
+
 # 🦅 Horyon
 
 **A personal crypto-intelligence system. It ingests around 100 news, X, and podcast sources every 20 minutes and applies an LLM pipeline to produce daily digests, narrative clusters, and an on-demand research agent.**
@@ -11,6 +13,10 @@ Available as a Telegram bot and a Next.js web application.
 ![Postgres](https://img.shields.io/badge/Postgres-pgvector-4169E1?logo=postgresql&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-D4AF37)
+
+<br>
+
+<img src="web/public/horyon-demo.gif" alt="Horyon web application — daily digest, narratives, and research agent" width="820">
 
 </div>
 
