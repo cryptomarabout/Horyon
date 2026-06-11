@@ -32,8 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate docker-compose
         run: |
-          export POSTGRES_PASSWORD=x OPENROUTER_API_KEY=x NIM_API_KEY=x \
-                 OPENROUTER_MODELS=x NIM_MODELS=x
+          cp .env.example .env   # services use env_file: .env; create it like a user would
           docker compose -f docker-compose.yml config -q
 
   secret-scan:
