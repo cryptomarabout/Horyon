@@ -1,0 +1,26 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+
+# Node / Next.js
+node_modules/
+web/.next/
+.next/
+dist/
+build/
+
+# Logs & temp
+*.log
+.DS_Store
+
+# Local env / secrets
+.env
+.env.local
+cookies.txt
+*.cookies.txt

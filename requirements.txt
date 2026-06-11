@@ -1,0 +1,11 @@
+openai>=1.40
+python-telegram-bot[webhooks]>=20,<22
+psycopg2-binary>=2.9
+ollama>=0.3
+feedparser>=6.0
+APScheduler>=3.10,<4
+python-dotenv>=1.0
+flask>=3.0
+docker>=7.0
+youtube-transcript-api>=0.6
+yt-dlp>=2024.1

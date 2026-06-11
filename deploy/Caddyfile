@@ -1,0 +1,28 @@
+# Public entrypoint for the bot + monitor + web.
+# Replace `your-domain.example.com` with your real hostname AND set
+# TELEGRAM_WEBHOOK_BASE in .env to match, then restart caddy + bot
+# (the bot re-registers the Telegram webhook on boot).
+#
+# Generate the basic_auth hash with:  docker run --rm caddy:2 caddy hash-password --plaintext 'yourpassword'
+# then paste it in place of REPLACE_WITH_BCRYPT_HASH below.
+#
+# NOTE: all routes use `handle` (not handle_path) so block order is preserved;
+# the matcher-less catch-all stays last.
+your-domain.example.com {
+	handle /tg/* {
+		reverse_proxy bot:8080
+	}
+	handle /monitor* {
+		uri strip_prefix /monitor
+		basic_auth {
+			admin REPLACE_WITH_BCRYPT_HASH
+		}
+		reverse_proxy monitor:8090
+	}
+	handle {
+		basic_auth {
+			admin REPLACE_WITH_BCRYPT_HASH
+		}
+		reverse_proxy web:3000
+	}
+}

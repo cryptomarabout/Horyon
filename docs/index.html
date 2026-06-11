@@ -1,0 +1,1232 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Horyon — Documentation</title>
+<style>
+  :root[data-theme="dark"] {
+    --bg: #0d1117;
+    --bg2: #161b22;
+    --bg3: #21262d;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text2: #8b949e;
+    --text3: #6e7681;
+    --accent: #58a6ff;
+    --accent2: #1f6feb;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --purple: #a371f7;
+    --orange: #e3b341;
+    --tag-bg: #1c2128;
+    --code-bg: #161b22;
+    --code-border: #30363d;
+    --shadow: rgba(0,0,0,0.4);
+    --nav-active: #1f6feb22;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff;
+    --bg2: #f6f8fa;
+    --bg3: #eaeef2;
+    --border: #d0d7de;
+    --text: #1f2328;
+    --text2: #636c76;
+    --text3: #9198a1;
+    --accent: #0969da;
+    --accent2: #0550ae;
+    --green: #1a7f37;
+    --yellow: #9a6700;
+    --red: #cf222e;
+    --purple: #8250df;
+    --orange: #953800;
+    --tag-bg: #eaeef2;
+    --code-bg: #f6f8fa;
+    --code-border: #d0d7de;
+    --shadow: rgba(0,0,0,0.1);
+    --nav-active: #0969da14;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.6;
+    display: flex;
+    min-height: 100vh;
+  }
+
+  /* ── NAV ── */
+  nav {
+    width: 260px;
+    min-width: 260px;
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 20px 0 40px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .nav-brand {
+    padding: 0 20px 20px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+  }
+  .nav-brand h1 {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.3;
+  }
+  .nav-brand p {
+    font-size: 11px;
+    color: var(--text3);
+    margin-top: 3px;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+  }
+  .nav-section { padding: 6px 0; }
+  .nav-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--text3);
+    padding: 6px 20px 4px;
+  }
+  nav a {
+    display: block;
+    padding: 5px 20px;
+    font-size: 13px;
+    color: var(--text2);
+    text-decoration: none;
+    border-left: 2px solid transparent;
+    transition: color .15s, background .15s, border-color .15s;
+  }
+  nav a:hover { color: var(--text); background: var(--nav-active); }
+  nav a.active { color: var(--accent); border-left-color: var(--accent); background: var(--nav-active); font-weight: 500; }
+
+  /* ── MAIN ── */
+  main {
+    flex: 1;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 40px 40px 80px;
+  }
+
+  /* ── HEADER ── */
+  .doc-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 40px;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .doc-header-left h1 {
+    font-size: 28px;
+    font-weight: 800;
+    letter-spacing: -.02em;
+    line-height: 1.2;
+  }
+  .doc-header-left p {
+    color: var(--text2);
+    margin-top: 8px;
+    font-size: 15px;
+  }
+  .badge-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+  }
+  .badge-blue  { background: #1f6feb33; color: #58a6ff; border: 1px solid #1f6feb55; }
+  .badge-green { background: #3fb95022; color: #3fb950; border: 1px solid #3fb95044; }
+  .badge-purple{ background: #a371f722; color: #a371f7; border: 1px solid #a371f744; }
+  .badge-orange{ background: #e3b34122; color: #e3b341; border: 1px solid #e3b34144; }
+
+  .theme-btn {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--text2);
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+    transition: background .15s, color .15s;
+  }
+  .theme-btn:hover { background: var(--border); color: var(--text); }
+
+  /* ── SECTIONS ── */
+  section { margin-bottom: 56px; scroll-margin-top: 24px; }
+  section h2 {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  section h2 .icon { font-size: 18px; }
+  section h3 {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 24px 0 10px;
+    color: var(--text);
+  }
+  section p { color: var(--text2); margin-bottom: 10px; }
+  section ul, section ol { padding-left: 20px; color: var(--text2); margin-bottom: 10px; }
+  section li { margin-bottom: 5px; }
+  section li strong { color: var(--text); }
+
+  /* ── CARDS ── */
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; margin-bottom: 24px; }
+  .card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .card:hover { border-color: var(--accent2); box-shadow: 0 0 0 1px var(--accent2); }
+  .card-icon { font-size: 20px; margin-bottom: 8px; }
+  .card h4 { font-size: 13px; font-weight: 700; margin-bottom: 4px; font-family: 'SFMono-Regular', Consolas, monospace; }
+  .card p { font-size: 12px; color: var(--text2); margin: 0; }
+  .card .card-tag { display: inline-block; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px; margin-top: 8px; }
+
+  /* ── TABLES ── */
+  .table-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--border); margin-bottom: 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    background: var(--bg3);
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--text2);
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text2);
+    vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--bg2); }
+  td code, th code {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 12px;
+    color: var(--accent);
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  td strong { color: var(--text); font-weight: 600; }
+
+  /* ── CODE BLOCKS ── */
+  .code-block {
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 8px;
+    margin: 12px 0 20px;
+    overflow: hidden;
+  }
+  .code-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px;
+    background: var(--bg3);
+    border-bottom: 1px solid var(--code-border);
+    font-size: 11px;
+    color: var(--text3);
+    font-family: 'SFMono-Regular', Consolas, monospace;
+  }
+  .copy-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text3);
+    padding: 2px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    transition: color .15s, border-color .15s;
+  }
+  .copy-btn:hover { color: var(--text); border-color: var(--text2); }
+  pre {
+    padding: 16px;
+    overflow-x: auto;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--text);
+    margin: 0;
+  }
+  pre .c { color: var(--text3); }     /* comment */
+  pre .k { color: #ff7b72; }          /* keyword */
+  pre .s { color: #a5d6ff; }          /* string */
+  pre .n { color: #ffa657; }          /* number/name */
+  pre .f { color: var(--green); }     /* function */
+  pre .sym { color: var(--purple); }  /* symbol */
+  pre .arr { color: var(--accent); }  /* arrow */
+
+  /* ── FLOW DIAGRAM ── */
+  .flow {
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 8px;
+    padding: 20px;
+    margin: 12px 0 20px;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.8;
+    color: var(--text);
+    overflow-x: auto;
+  }
+  .flow .flow-title { color: var(--orange); font-weight: 700; display: block; margin-bottom: 4px; }
+  .flow .flow-step { color: var(--text2); display: block; padding-left: 4px; }
+  .flow .flow-step .arrow { color: var(--green); }
+  .flow .flow-step .fn { color: var(--accent); }
+  .flow .flow-step .lbl { color: var(--purple); }
+  .flow .flow-step .note { color: var(--text3); }
+
+  /* ── ALERTS ── */
+  .alert {
+    display: flex;
+    gap: 12px;
+    padding: 14px 16px;
+    border-radius: 8px;
+    margin: 12px 0;
+    border-left: 3px solid;
+    font-size: 13px;
+  }
+  .alert-icon { flex-shrink: 0; font-size: 16px; line-height: 1.4; }
+  .alert-body { color: var(--text2); }
+  .alert-body strong { color: var(--text); }
+  .alert-yellow { background: #d2992211; border-color: var(--yellow); }
+  .alert-red    { background: #f8514911; border-color: var(--red); }
+  .alert-blue   { background: #58a6ff11; border-color: var(--accent); }
+  .alert-green  { background: #3fb95011; border-color: var(--green); }
+
+  /* ── FILE TREE ── */
+  .file-tree {
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.9;
+    margin: 12px 0 20px;
+  }
+  .ft-dir { color: var(--accent); font-weight: 700; }
+  .ft-file { color: var(--text2); }
+  .ft-file .ft-name { color: var(--text); }
+  .ft-file .ft-desc { color: var(--text3); }
+  .ft-indent { padding-left: 20px; display: block; }
+
+  /* ── SCHEMA PILLS ── */
+  .schema-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin: 12px 0 20px; }
+  .schema-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .schema-card h5 { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 12px; color: var(--accent); margin-bottom: 6px; font-weight: 700; }
+  .schema-card p { font-size: 11px; color: var(--text3); margin: 0; }
+  .schema-card .schema-key { font-size: 10.5px; color: var(--text2); margin-top: 4px; font-family: 'SFMono-Regular', Consolas, monospace; }
+
+  /* ── CRON TABLE ── */
+  .cron-row { display: flex; align-items: baseline; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .cron-row:last-child { border-bottom: none; }
+  .cron-time { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 11px; color: var(--orange); min-width: 130px; }
+  .cron-desc { font-size: 13px; color: var(--text2); }
+  .cron-desc strong { color: var(--text); }
+  .cron-box { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 4px 14px; margin: 12px 0 20px; }
+
+  /* ── GOTCHA LIST ── */
+  .gotcha { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  .gotcha:last-child { border-bottom: none; }
+  .gotcha-title { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 3px; }
+  .gotcha-body { font-size: 12.5px; color: var(--text2); }
+  .gotcha-body code {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 11.5px;
+    color: var(--accent);
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    padding: 0 4px;
+    border-radius: 3px;
+  }
+  .gotcha-box { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 12px 0; }
+
+  /* ── SCROLLBAR ── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ── RESPONSIVE ── */
+  @media (max-width: 768px) {
+    nav { display: none; }
+    main { padding: 24px 20px 60px; }
+    .doc-header { flex-direction: column; gap: 12px; }
+    .card-grid { grid-template-columns: 1fr; }
+  }
+
+  /* ── MISC ── */
+  .inline-code {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 12px;
+    color: var(--accent);
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; vertical-align: middle; }
+  .dot-green { background: var(--green); }
+  .dot-blue { background: var(--accent); }
+  .dot-orange { background: var(--orange); }
+  .dot-purple { background: var(--purple); }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .two-col { grid-template-columns: 1fr; } }
+
+  hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+</style>
+</head>
+<body>
+
+<!-- ── SIDEBAR NAV ── -->
+<nav>
+  <div class="nav-brand">
+    <h1>🦅 Horyon</h1>
+    <p>v1 · personal · standalone</p>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-label">Overview</div>
+    <a href="#overview">What This Is</a>
+    <a href="#stack">Stack & Containers</a>
+    <a href="#cron">Cron Schedule</a>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-label">Architecture</div>
+    <a href="#ingest-flow">Ingest Flow</a>
+    <a href="#digest-flow">Digest Flow</a>
+    <a href="#agent-flow">Agent Flow</a>
+    <a href="#weekly-flow">Weekly Macro</a>
+    <a href="#governance-flow">Governance</a>
+    <a href="#web-layout">Web Layout</a>
+    <a href="#og-image">Social Image / OG</a>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-label">Codebase</div>
+    <a href="#app-files">app/ Files</a>
+    <a href="#web-files">web/ Files</a>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-label">Data</div>
+    <a href="#schema">Database Schema</a>
+    <a href="#config">Config Tunables</a>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-label">Operations</div>
+    <a href="#running">Running Locally</a>
+    <a href="#docker">Docker Commands</a>
+    <a href="#manual-triggers">Manual Triggers</a>
+    <a href="#gotchas">Conventions & Gotchas</a>
+    <a href="#verifying">Verifying Changes</a>
+  </div>
+</nav>
+
+<!-- ── MAIN CONTENT ── -->
+<main>
+
+  <!-- Header -->
+  <div class="doc-header">
+    <div class="doc-header-left">
+      <h1>🦅 Horyon</h1>
+      <p>Personal crypto-intelligence Telegram bot with semantic search, entity memory, and AI analyst views.</p>
+      <div class="badge-row">
+        <span class="badge badge-blue">Python · PTB</span>
+        <span class="badge badge-green">Next.js 14</span>
+        <span class="badge badge-purple">pgvector</span>
+        <span class="badge badge-orange">OpenRouter</span>
+      </div>
+    </div>
+    <button class="theme-btn" onclick="toggleTheme()">☀︎ / ☾ Theme</button>
+  </div>
+
+  <!-- ── OVERVIEW ── -->
+  <section id="overview">
+    <h2><span class="icon">🧠</span> What This Is</h2>
+    <p>A fully standalone personal crypto-intelligence platform. Ingests <strong>~100 RSS feeds every 20 minutes</strong> into Postgres with pgvector embeddings. Two output modes:</p>
+
+    <div class="two-col" style="margin: 16px 0;">
+      <div class="card">
+        <div class="card-icon">📋</div>
+        <h4>/digest</h4>
+        <p>Curated 5–10 bullet summary of the last 24 hours. Auto-runs at 09:00 UTC+2 daily. Two-stage deduplication prevents repeat stories.</p>
+        <span class="card-tag badge-green">Daily</span>
+      </div>
+      <div class="card">
+        <div class="card-icon">🔍</div>
+        <h4>/updates &lt;keyword&gt;</h4>
+        <p>ReAct agent with semantic feed search. Injects entity memory + analyst notes context. Free-text input also routed here.</p>
+        <span class="card-tag badge-blue">On-demand</span>
+      </div>
+    </div>
+
+    <h3>Intelligence Layer</h3>
+    <ul>
+      <li><strong>Entity memory</strong> — self-building knowledge base: LLM extraction at ingest time, alias-match enrichment for prompts</li>
+      <li><strong>Analyst scratchpad</strong> — post-digest theme &amp; entity extraction stored in <span class="inline-code">analyst_notes</span></li>
+      <li><strong>Digest chain</strong> — last 3 daily digests injected as context into each new run</li>
+      <li><strong>Pre-computed bullet analyses</strong> — up to 5 parallel LLM calls post-digest, stored in <span class="inline-code">digest_bullet_analysis</span></li>
+      <li><strong>Weekly macro digest</strong> — Monday 07:30 UTC; last 3 previous weeks injected for trend continuity</li>
+    </ul>
+
+    <h3>Deduplication (Daily Digest)</h3>
+    <div class="alert alert-blue">
+      <div class="alert-icon">🔁</div>
+      <div class="alert-body">
+        <strong>Stage 1 — URL pre-filter:</strong> feed items whose exact source URL appeared in the last 7 days are dropped before the LLM.<br>
+        <strong>Stage 2 — Python post-filter:</strong> after LLM generation, bullets whose normalized title (first 6 significant words, lowercased, emoji-stripped) matches any title from the last 7 days are removed deterministically. The <code>covered_bullets</code> list is also injected into the prompt as an absolute exclusion list.
+      </div>
+    </div>
+  </section>
+
+  <!-- ── STACK ── -->
+  <section id="stack">
+    <h2><span class="icon">🐳</span> Stack &amp; Containers</h2>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-icon">🤖</div>
+        <h4>horyon-bot</h4>
+        <p>Bot + APScheduler. Ingest 20 min, digest 07:00 UTC, TVL 07:10, protocols 2h, governance 30 min.</p>
+        <span class="card-tag badge-blue">horyon</span>
+      </div>
+      <div class="card">
+        <div class="card-icon">🗄️</div>
+        <h4>horyon-db</h4>
+        <p>Postgres with pgvector. Database: <span class="inline-code">crypto</span>. Exposed on host port <strong>5433</strong>.</p>
+        <span class="card-tag badge-purple">pgvector/pgvector:pg16</span>
+      </div>
+      <div class="card">
+        <div class="card-icon">🌐</div>
+        <h4>horyon-caddy</h4>
+        <p>TLS + routing. <span class="inline-code">/tg/*</span>→bot, <span class="inline-code">/monitor*</span>→monitor, <span class="inline-code">/*</span>→web.</p>
+        <span class="card-tag badge-orange">caddy:2</span>
+      </div>
+      <div class="card">
+        <div class="card-icon">📊</div>
+        <h4>horyon-monitor</h4>
+        <p>Flask status dashboard with basic auth. Separate container/command.</p>
+        <span class="card-tag badge-blue">horyon</span>
+      </div>
+      <div class="card">
+        <div class="card-icon">💻</div>
+        <h4>horyon-web</h4>
+        <p>Next.js 14 digest viewer with basic auth. Served from <span class="inline-code">web/</span>.</p>
+        <span class="card-tag badge-green">horyon-web</span>
+      </div>
+    </div>
+
+    <h3>External Dependencies</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Service</th><th>How Used</th><th>Key</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Telegram</strong></td><td>Webhook for incoming messages</td><td><code>TELEGRAM_TOKEN</code></td></tr>
+          <tr><td><strong>OpenRouter</strong></td><td>LLM API; falls back through <code>OPENROUTER_MODELS</code> list</td><td><code>OPENROUTER_API_KEY</code></td></tr>
+          <tr><td><strong>Ollama</strong> (host)</td><td><code>nomic-embed-text</code> 768-dim embeddings at <code>host.docker.internal:11434</code></td><td>—</td></tr>
+          <tr><td><strong>DeFiLlama</strong></td><td>Chain TVL + protocol TVL (free API, stdlib urllib only)</td><td>—</td></tr>
+          <tr><td><strong>CoinMarketCap</strong></td><td>Market data; falls back to CoinGecko if key absent</td><td><code>CMC_API_KEY</code> (optional)</td></tr>
+          <tr><td><strong>Snapshot</strong></td><td>Governance proposals via GraphQL (<code>hub.snapshot.org/graphql</code>); no auth</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── CRON SCHEDULE ── -->
+  <section id="cron">
+    <h2><span class="icon">⏱</span> Cron Schedule</h2>
+    <div class="cron-box">
+      <div class="cron-row">
+        <span class="cron-time">every 20 min</span>
+        <span class="cron-desc"><strong>Ingest</strong> — fetch ~100 RSS feeds → embed → entity extraction</span>
+      </div>
+      <div class="cron-row">
+        <span class="cron-time">07:00 UTC</span>
+        <span class="cron-desc"><strong>Daily digest</strong> — build + persist + bullet analyses</span>
+      </div>
+      <div class="cron-row">
+        <span class="cron-time">07:10 UTC</span>
+        <span class="cron-desc"><strong>Chain TVL</strong> — DeFiLlama daily chain snapshot</span>
+      </div>
+      <div class="cron-row">
+        <span class="cron-time">every 2h</span>
+        <span class="cron-desc"><strong>Protocol TVL</strong> — DeFiLlama protocol metadata + chain_tvls</span>
+      </div>
+      <div class="cron-row">
+        <span class="cron-time">every 30 min</span>
+        <span class="cron-desc"><strong>Governance</strong> — Snapshot active proposals upsert</span>
+      </div>
+      <div class="cron-row">
+        <span class="cron-time">Monday 07:30 UTC</span>
+        <span class="cron-desc"><strong>Weekly macro digest</strong> — market + DeFi + 7d news → LLM → <code>weekly_digest</code></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── INGEST FLOW ── -->
+  <section id="ingest-flow">
+    <h2><span class="icon">📥</span> Ingest Flow</h2>
+    <div class="flow">
+<span class="flow-title">── Ingest (every 20 min, only when inserted > 0) ──</span>
+<span class="flow-step"><span class="fn">ingest.run_once()</span></span>
+<span class="flow-step">  <span class="arrow">→</span> <span class="fn">insert_feed_items()</span> <span class="arrow">→</span> <span class="fn">embed_missing()</span></span>
+<span class="flow-step">  <span class="arrow">→</span> <span class="fn">entities.extract_and_upsert_entities(new_items)</span></span>
+<span class="flow-step">      <span class="lbl">LLM call</span> <span class="note">(max_tokens=600)</span>: texts <span class="arrow">→</span> [{slug, name, type, aliases}] JSON</span>
+<span class="flow-step">      <span class="arrow">→</span> <span class="fn">db.upsert_entity()</span> <span class="arrow">→</span> <span class="lbl">entity_memory</span> <span class="note">(aliases union-merged, mention_count++)</span></span>
+    </div>
+    <p>Entity extraction only fires when <span class="inline-code">inserted &gt; 0</span> — no-op cycles skip the LLM call. The <span class="inline-code">entity_memory</span> table self-populates over time; warm-start available via <span class="inline-code">seed_entities_from_protocols()</span>.</p>
+  </section>
+
+  <!-- ── DIGEST FLOW ── -->
+  <section id="digest-flow">
+    <h2><span class="icon">📰</span> Digest Flow</h2>
+    <div class="flow">
+<span class="flow-title">── Digest (daily 07:00 UTC + manual) ──</span>
+<span class="flow-step"><span class="fn">digest.build_digest()</span></span>
+<span class="flow-step">  ① <span class="fn">entities.build_entity_context(feed_items)</span></span>
+<span class="flow-step">       <span class="note">alias map from entity_memory → matched slugs (free, no LLM)</span></span>
+<span class="flow-step">       <span class="arrow">→</span> TVL + summary from defillama_protocols + entity_memory</span>
+<span class="flow-step">       <span class="arrow">→</span> <span class="lbl">"ENTITY CONTEXT"</span> block <span class="note">(top ENTITY_CONTEXT_LIMIT entities)</span></span>
+<span class="flow-step">  ② <span class="fn">analyst.format_analyst_notes()</span>   <span class="arrow">→</span> last ANALYST_NOTES_DAYS days of notes</span>
+<span class="flow-step">  ③ <span class="fn">analyst.format_digest_chain()</span>    <span class="arrow">→</span> last DIGEST_CHAIN_DAYS past digests</span>
+<span class="flow-step">  ④ <span class="fn">build_digest_user</span>(tweets, entity_context, digest_chain, analyst_notes, tvl_context)</span>
+<span class="flow-step">  ⑤ <span class="fn">llm.complete()</span> <span class="arrow">→</span> raw digest</span>
+
+<span class="flow-step" style="margin-top:10px;"><span class="fn">digest.run_digest()</span></span>
+<span class="flow-step">  <span class="arrow">→</span> <span class="fn">build_digest()</span> <span class="arrow">→</span> <span class="fn">persist_digest()</span></span>
+<span class="flow-step">  <span class="arrow">→</span> <span class="fn">analyst.extract_and_persist(raw)</span>  <span class="note">← non-blocking, logged on failure</span></span>
+<span class="flow-step">       <span class="lbl">LLM call</span> <span class="note">(max_tokens=800)</span>: digest <span class="arrow">→</span> {notes: [...], entity_updates: {}}</span>
+<span class="flow-step">       <span class="arrow">→</span> analyst_notes row + entity_memory.summary updates per entity</span>
+<span class="flow-step">  <span class="arrow">→</span> <span class="fn">generate_and_store_bullet_analyses(date, html)</span>  <span class="note">← up to 5 parallel LLM calls</span></span>
+<span class="flow-step">       <span class="arrow">→</span> digest_bullet_analysis rows <span class="note">(title → analysis)</span></span>
+    </div>
+
+    <div class="alert alert-yellow">
+      <div class="alert-icon">⚠️</div>
+      <div class="alert-body">
+        <strong>Bullet analyses sync:</strong> <code>db.delete_bullet_analyses(date)</code> must be called before <code>generate_and_store_bullet_analyses()</code> on a date being regenerated — otherwise stale rows for old titles accumulate. The backfill handles this automatically.
+      </div>
+    </div>
+  </section>
+
+  <!-- ── AGENT FLOW ── -->
+  <section id="agent-flow">
+    <h2><span class="icon">🤖</span> Specialized Agent Flow</h2>
+    <div class="flow">
+<span class="flow-title">── Agent (per query) ──</span>
+<span class="flow-step"><span class="fn">specialized.run_specialized(query)</span></span>
+<span class="flow-step">  <span class="arrow">→</span> <span class="fn">entities.build_entity_context_for_query(query)</span></span>
+<span class="flow-step">  <span class="arrow">→</span> <span class="fn">analyst.format_analyst_notes()</span></span>
+<span class="flow-step">  <span class="arrow">→</span> system = SPECIALIZED_SYSTEM + tvl_ctx + entity_ctx + notes_ctx</span>
+<span class="flow-step">  <span class="arrow">→</span> <span class="fn">llm.run_agent</span>(tools=[<span class="lbl">search_feed</span>])</span>
+<span class="flow-step">       ReAct loop <span class="note">(capped at AGENT_MAX_STEPS=8)</span></span>
+<span class="flow-step">       <span class="lbl">search_feed</span>: pgvector ANN + ivfflat.probes <span class="note">(30-day window, top-K=40)</span></span>
+    </div>
+    <div class="alert alert-blue">
+      <div class="alert-icon">ℹ️</div>
+      <div class="alert-body">
+        <strong>pgvector recall:</strong> <code>db.search_feed()</code> sets <code>SET LOCAL ivfflat.probes</code>. Without it, the 30-day filter returns ~1 result due to IVFFLAT's approximate nature.
+      </div>
+    </div>
+  </section>
+
+  <!-- ── WEEKLY FLOW ── -->
+  <section id="weekly-flow">
+    <h2><span class="icon">📅</span> Weekly Macro Digest</h2>
+    <div class="flow">
+<span class="flow-title">── Weekly macro (Monday 07:30 UTC + manual) ──</span>
+<span class="flow-step"><span class="fn">weekly.run_weekly()</span></span>
+<span class="flow-step">  <span class="arrow">→</span> <span class="fn">coinmarketcap.get_market_data()</span>  <span class="note">(CoinGecko fallback if no CMC_API_KEY)</span></span>
+<span class="flow-step">  <span class="arrow">→</span> defillama: chain TVL + protocol TVL context</span>
+<span class="flow-step">  <span class="arrow">→</span> db: last 7d feed items <span class="note">(news context)</span></span>
+<span class="flow-step">  <span class="arrow">→</span> db: last 3 weekly_digest rows <span class="note">(trend continuity, dedup via WEEKLY_SYSTEM prompt)</span></span>
+<span class="flow-step">  <span class="arrow">→</span> <span class="fn">llm.complete</span>(WEEKLY_SYSTEM, user_prompt) <span class="arrow">→</span> HTML content</span>
+<span class="flow-step">  <span class="arrow">→</span> <span class="fn">db.upsert_weekly_digest</span>(week_start, week_end, content, rotation)</span>
+<span class="flow-step">       rotation = BTC | ETH | ALT | MIXED <span class="note">(detected from content)</span></span>
+
+<span class="flow-step" style="margin-top:10px;"><span class="lbl">weekly_digest table</span> <span class="arrow">→</span> web layout.js <span class="arrow">→</span> <span class="fn">getWeeklyForDate(date)</span></span>
+<span class="flow-step">  <span class="arrow">→</span> Sidebar "Weekly" section: rotation badge + week range link</span>
+<span class="flow-step">  <span class="arrow">→</span> digest page: WeeklyMacro collapsible banner <span class="note">(above bullet list)</span></span>
+<span class="flow-step">  <span class="arrow">→</span> RightPanel WeeklyPanel: tabbed view <span class="note">(All/Market/Movers/DeFi/Trending/Stories/Watch)</span></span>
+<span class="flow-step">       Key Stories links <span class="arrow">→</span> /api/find-digest <span class="arrow">→</span> matching daily digest date</span>
+    </div>
+    <p><span class="inline-code">WEEKLY_SYSTEM</span> prompt instructs the LLM not to repeat Key Stories from previous weeks unless there's a concrete new outcome (confirmed amounts, governance result, etc.).</p>
+    <div class="alert alert-yellow">
+      <div class="alert-icon">⚠️</div>
+      <div class="alert-body">
+        <strong>DEX weekly volume</strong> — <code>/overview/dexs?dataType=weeklyVolume</code> returns HTTP 500 on the free DeFiLlama plan. This is expected and handled gracefully.
+      </div>
+    </div>
+  </section>
+
+  <!-- ── GOVERNANCE FLOW ── -->
+  <section id="governance-flow">
+    <h2><span class="icon">🏛</span> Governance Proposals</h2>
+    <div class="flow">
+<span class="flow-title">── Governance (every 30 min) ──</span>
+<span class="flow-step"><span class="fn">snapshot.fetch_and_store()</span></span>
+<span class="flow-step">  step 1 <span class="note">(cached 24 h)</span>: <span class="fn">_graphql(_SPACES_QUERY)</span></span>
+<span class="flow-step">       <span class="arrow">→</span> all verified Snapshot spaces, top 500 by follower count</span>
+<span class="flow-step">       <span class="arrow">→</span> _spaces_cache <span class="note">(module-level, reset on container restart)</span></span>
+<span class="flow-step">  step 2: <span class="fn">_graphql(_PROPOSALS_QUERY</span>, {spaces: _spaces_cache})</span>
+<span class="flow-step">       <span class="arrow">→</span> active proposals <span class="note">(state="active")</span>, first 50, ordered by end ASC</span>
+<span class="flow-step">       <span class="arrow">→</span> <span class="fn">db.upsert_governance_proposals(rows)</span>  ON CONFLICT DO UPDATE</span>
+
+<span class="flow-step" style="margin-top:10px;"><span class="lbl">governance_proposals table</span> <span class="arrow">→</span> web layout.js <span class="arrow">→</span> <span class="fn">getGovernanceProposals(limit=6)</span></span>
+<span class="flow-step">  <span class="arrow">→</span> Sidebar "Governance": green dot + space name + title + time remaining</span>
+<span class="flow-step">  <span class="arrow">→</span> links to snapshot.org/#/{space_id}/proposal/{proposal_id}</span>
+    </div>
+    <p>Closed proposals disappear automatically on the next upsert cycle — only <span class="inline-code">state = 'active'</span> proposals are stored. The verified spaces list is intentionally ephemeral (module-level cache, not in DB).</p>
+  </section>
+
+  <!-- ── WEB LAYOUT ── -->
+  <section id="web-layout">
+    <h2><span class="icon">🖥</span> Web Layout</h2>
+
+    <div class="flow">
+<span class="flow-title">── RootLayout (server) ──</span>
+<span class="flow-step">Promise.all: listDigests + getTvlSnapshot + listWeeklyDigests + getGovernanceProposals</span>
+<span class="flow-step">  <span class="arrow">→</span> &lt;Header&gt;  server; contains &lt;MobileMenuButton&gt; client island</span>
+<span class="flow-step">  <span class="arrow">→</span> &lt;Sidebar&gt;  client; manages data-sidebar + data-mobile-nav on &lt;html&gt;</span>
+<span class="flow-step">       Weekly section <span class="arrow">→</span> weeklyItems prop</span>
+<span class="flow-step">       Governance     <span class="arrow">→</span> governance prop <span class="note">(above TVL)</span></span>
+<span class="flow-step">       Archive dates  <span class="arrow">→</span> items prop</span>
+<span class="flow-step">       TVL snapshot   <span class="arrow">→</span> tvl prop</span>
+<span class="flow-step">  <span class="arrow">→</span> &lt;main.reader&gt;  children</span>
+    </div>
+
+    <div class="flow">
+<span class="flow-title">── DigestPage (server component) ──</span>
+<span class="flow-step"><span class="fn">parseDigest()</span>        <span class="arrow">→</span> bullets [{title, body, hack, link}]</span>
+<span class="flow-step"><span class="fn">buildProjectHints()</span>  <span class="arrow">→</span> projectHints [{protocols, chains}]  (parallel SSR)</span>
+<span class="flow-step"><span class="fn">getBulletAnalyses()</span>  <span class="arrow">→</span> analyses {title → html} <span class="note">(pre-computed, instant)</span></span>
+<span class="flow-step"><span class="fn">getTvlWithChange()</span>   <span class="arrow">→</span> tvl strip data</span>
+<span class="flow-step"><span class="fn">getWeeklyForDate()</span>   <span class="arrow">→</span> weekly macro content + rotation</span>
+<span class="flow-step">  <span class="arrow">→</span> &lt;WeeklyMacro&gt;   collapsible banner above bullet feed</span>
+<span class="flow-step">  <span class="arrow">→</span> &lt;BulletFeed enrichedBullets projectHints analyses tvl market weekly /&gt;</span>
+
+<span class="flow-step" style="margin-top:8px;"><span class="fn">BulletFeed</span> <span class="note">(client — owns selectedIndex, panelOpen)</span></span>
+<span class="flow-step">  <span class="arrow">→</span> &lt;MarketBar /&gt;   BTC/ETH price + 24h/7d/30d + dominance</span>
+<span class="flow-step">  <span class="arrow">→</span> &lt;TvlStrip /&gt;    chain TVL chips with 24h % change</span>
+<span class="flow-step">  <span class="arrow">→</span> &lt;BulletItem /&gt;  ×N stateless rows</span>
+<span class="flow-step">  <span class="arrow">→</span> &lt;RightPanel bullet hint cachedAnalysis onClose weekly /&gt;</span>
+
+<span class="flow-step" style="margin-top:8px;"><span class="fn">RightPanel</span> <span class="note">(client)</span></span>
+<span class="flow-step">  <span class="arrow">→</span> cachedAnalysis prop <span class="arrow">→</span> instant render <span class="note">(no fetch when pre-computed)</span></span>
+<span class="flow-step">  <span class="arrow">→</span> fetch /api/details as fallback <span class="note">(AbortController — cancels on bullet change)</span></span>
+<span class="flow-step">  <span class="arrow">→</span> ProtocolCard: logo + TVL + ChainDistribution bars</span>
+<span class="flow-step">  <span class="arrow">→</span> ChainCard: logo + rank + TVL; <span class="note">word-boundary regex (\bName\b) prevents false matches</span></span>
+<span class="flow-step">  <span class="arrow">→</span> WeeklyPanel: tabbed; movers as chips; Key Stories <span class="arrow">→</span> /api/find-digest</span>
+<span class="flow-step">  <span class="arrow">→</span> RelatedStories: /api/related <span class="arrow">→</span> last 30d digests by entity/keyword</span>
+    </div>
+
+    <h3>Layout Rules</h3>
+    <ul>
+      <li><code>BulletFeed.js</code> owns all interaction state — do not add per-bullet state to <code>BulletItem.js</code></li>
+      <li>Sidebar collapse: <code>Sidebar.js</code> sets <code>data-sidebar</code> on <code>&lt;html&gt;</code>; CSS responds. No ShellClient wrapper.</li>
+      <li>Mobile drawer: backdrop portalled into <code>.shell</code> (not <code>document.body</code>) — <code>.shell { position:fixed }</code> creates its own stacking context. Sidebar is z-index 102, backdrop is z-index 50 within shell.</li>
+      <li><code>cachedAnalysis</code> prop is the primary path; <code>/api/details</code> is only the fallback for missing rows.</li>
+    </ul>
+  </section>
+
+  <!-- ── SOCIAL IMAGE ── -->
+  <section id="og-image">
+    <h2><span class="icon">🖼</span> Social Image Generator <code style="font-size:14px">/api/og</code></h2>
+    <p>On-demand 1080×1080 PNG generation for social sharing. No extra npm dependencies — uses <span class="inline-code">next/og</span> (satori) built into Next.js 14.</p>
+
+    <h3>Endpoint</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Param</th><th>Default</th><th>Options</th></tr></thead>
+        <tbody>
+          <tr><td><code>date</code></td><td>latest digest</td><td>YYYY-MM-DD</td></tr>
+          <tr><td><code>type</code></td><td><code>daily</code></td><td><code>daily</code> · <code>weekly</code> · <code>markets</code> · <code>alpha</code> · <code>defi</code></td></tr>
+          <tr><td><code>bullets</code></td><td>all (max 10)</td><td>1–10 — limit signal count</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Layout</h3>
+    <div class="flow">
+<span class="flow-title">── 1080 × 1080 px, Bloomberg-style full-width ──</span>
+<span class="flow-step"><span class="lbl">HEADER</span>  52px  [falcon] HORYON · CRYPTO INTELLIGENCE FEED          HORYON.AI</span>
+<span class="flow-step"><span class="lbl">GOLD BAR</span> 3px   full-width #D4AF37</span>
+<span class="flow-step"><span class="lbl">HERO</span>    90px  <span class="fn">"DAILY EDGE"</span> Raleway 800 78px  |  N SIGNALS · DAY · DATE</span>
+<span class="flow-step">              <span class="note">falcon watermark: position absolute right, 7% opacity</span></span>
+<span class="flow-step"><span class="lbl">HAIRLINE</span> 1px   rgba(255,255,255,0.08)</span>
+<span class="flow-step"><span class="lbl">SIGNALS</span> 881px  n rows, each <span class="fn">flex:1</span></span>
+<span class="flow-step">  per row: <span class="arr">│</span> 3px category stripe  <span class="arr">·</span>  number (cat color)  <span class="arr">·</span>  title 30–44px  <span class="arr">·</span>  [TAG]</span>
+<span class="flow-step">           <span class="arr">│</span> description (single line, hidden at n≥10)</span>
+<span class="flow-step"><span class="lbl">GOLD RULE</span> 1px  rgba(212,175,55,0.30)</span>
+<span class="flow-step"><span class="lbl">FOOTER</span>  52px  THE MARKET MOVES. WE HELP YOU SEE IT FIRST.  |  taglines</span>
+    </div>
+
+    <h3>Adaptive Sizing</h3>
+    <p>Title font size and card density scale automatically with signal count to maintain readability at ~300px display width (28% scale).</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Signals</th><th>Title size</th><th>Desc max len</th><th>Show desc</th></tr></thead>
+        <tbody>
+          <tr><td>≤ 4</td><td>44px</td><td>110 chars</td><td>yes</td></tr>
+          <tr><td>≤ 6</td><td>40px</td><td>92 chars</td><td>yes <em>(sweet spot)</em></td></tr>
+          <tr><td>≤ 8</td><td>36px</td><td>76 chars</td><td>yes</td></tr>
+          <tr><td>9–10</td><td>32px</td><td>—</td><td>no</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Category Detection</h3>
+    <p>Each signal is auto-tagged by matching title + body text against 10 regex patterns. The tag color is applied to the left stripe, number, and tag pill.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Tag</th><th>Color</th><th>Keywords (sample)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>SECURITY</strong></td><td style="color:#EF4444">#EF4444</td><td>hack, exploit, freeze, blacklist, rug, breach</td></tr>
+          <tr><td><strong>GOVERNANCE</strong></td><td style="color:#A855F7">#A855F7</td><td>govern, vote, dao, proposal, futarch</td></tr>
+          <tr><td><strong>PRIVACY</strong></td><td style="color:#8B5CF6">#8B5CF6</td><td>privacy, zkp, zero-knowledge, confidential</td></tr>
+          <tr><td><strong>INFRA</strong></td><td style="color:#6366F1">#6366F1</td><td>l2, rollup, bridge, quantum, evm</td></tr>
+          <tr><td><strong>DEFI</strong></td><td style="color:#10B981">#10B981</td><td>defi, tvl, liquidity, amm, dex, vault</td></tr>
+          <tr><td><strong>AI</strong></td><td style="color:#F59E0B">#F59E0B</td><td>ai, llm, agent, gpt, intelligence</td></tr>
+          <tr><td><strong>PRODUCT</strong></td><td style="color:#60A5FA">#60A5FA</td><td>browser, wallet, sdk, cli, platform</td></tr>
+          <tr><td><strong>BITCOIN</strong></td><td style="color:#F97316">#F97316</td><td>btc, bitcoin, miner, halving</td></tr>
+          <tr><td><strong>REGULATORY</strong></td><td style="color:#EC4899">#EC4899</td><td>regulation, sec, cftc, legal, compliance</td></tr>
+          <tr><td><strong>MARKETS</strong></td><td style="color:#D4AF37">#D4AF37</td><td>market, fund, vc, raise, capital</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="alert alert-yellow">
+      <div class="alert-icon">⚠️</div>
+      <div class="alert-body">
+        <strong>Font loading gotcha:</strong> <code>@vercel/og</code> (bundled in Next.js 14.x) only accepts TTF/OTF — woff/woff2 throw <em>"Unsupported OpenType signature"</em>.
+        Fonts are fetched via the Google Fonts <strong>v1</strong> API with <strong>no User-Agent header</strong>: Node's default UA causes Google Fonts to return a <code>format('truetype')</code> CSS response with a real TTF binary URL.
+        Setting a browser-like UA returns woff2 → crash. Setting the old IE6 UA returns woff from the dynamic <code>/l/font</code> endpoint → also crash.
+      </div>
+    </div>
+  </section>
+
+  <!-- ── APP FILES ── -->
+  <section id="app-files">
+    <h2><span class="icon">📁</span> app/ Files</h2>
+    <div class="file-tree">
+      <span class="ft-dir">app/</span>
+      <span class="ft-indent ft-file"><span class="ft-name">main.py</span> <span class="ft-desc">— PTB entrypoint + APScheduler cron registration</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">config.py</span> <span class="ft-desc">— all env-backed config. Never read os.environ elsewhere.</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">handlers.py</span> <span class="ft-desc">— Telegram command/free-text router</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">digest.py</span> <span class="ft-desc">— daily digest: entity + chain + notes + TVL + dedup context, LLM, post-filter, persist; triggers bullet analyses</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">specialized.py</span> <span class="ft-desc">— ReAct agent with search_feed tool; injects entity + analyst notes context</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">entities.py</span> <span class="ft-desc">— entity memory: LLM extraction at ingest-time, alias-match enrichment for prompts</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">analyst.py</span> <span class="ft-desc">— scratchpad: post-digest theme/entity extraction; digest chain + notes formatter</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">ingest.py</span> <span class="ft-desc">— fetch → clean → insert → embed → entity extraction (only when inserted > 0)</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">weekly.py</span> <span class="ft-desc">— weekly macro: market + DeFi + 7d news context, LLM, persists to weekly_digest</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">coinmarketcap.py</span> <span class="ft-desc">— market data: CoinMarketCap (CMC_API_KEY) else CoinGecko free fallback</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">defillama.py</span> <span class="ft-desc">— chain TVL (daily) + protocol TVL (every 2h); stdlib urllib only</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">snapshot.py</span> <span class="ft-desc">— Snapshot DAO governance via GraphQL; verified spaces cached 24h; 50 active proposals</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">llm.py</span> <span class="ft-desc">— OpenRouter client; complete() and run_agent() return (content, model_used)</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">prompts.py</span> <span class="ft-desc">— all prompts live here only. build_digest_user() accepts entity/chain/notes context</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">db.py</span> <span class="ft-desc">— psycopg2 pool; entity_memory + analyst_notes CRUD; pgvector via ::vector literals</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">embeddings.py</span> <span class="ft-desc">— Ollama embed wrapper (768-dim)</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">memory.py</span> <span class="ft-desc">— per-chat history in chat_history</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">feeds.py</span> <span class="ft-desc">— SOURCES list (~100 RSS URLs) and domain→name map</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">telegram_html.py</span> <span class="ft-desc">— HTML allow-list sanitizer + 4096-char splitter</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">monitor.py</span> <span class="ft-desc">— Flask dashboard (separate container/command)</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">backfill_digests.py</span> <span class="ft-desc">— seed entities + regenerate all digests with intelligence + dedup context; 7-day rolling window</span></span>
+    </div>
+    <div class="alert alert-yellow">
+      <div class="alert-icon">⚠️</div>
+      <div class="alert-body">
+        <strong>app/ is baked into the image</strong> — no volume mount. After any Python change: <code>docker compose build bot &amp;&amp; docker compose up -d bot monitor</code>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── WEB FILES ── -->
+  <section id="web-files">
+    <h2><span class="icon">🌐</span> web/ Files</h2>
+    <div class="file-tree">
+      <span class="ft-dir">web/app/</span>
+      <span class="ft-indent ft-file"><span class="ft-name">layout.js</span> <span class="ft-desc">— root server component: Promise.all fetches + Sidebar</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">page.js</span> <span class="ft-desc">— today's digest server component</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">d/[date]/page.js</span> <span class="ft-desc">— archive digest server component</span></span>
+
+      <span class="ft-dir" style="margin-top:8px;">web/app/components/</span>
+      <span class="ft-indent ft-file"><span class="ft-name">BulletFeed.js</span> <span class="ft-desc">— client root: owns selected + panelOpen state</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">BulletItem.js</span> <span class="ft-desc">— stateless bullet row</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">BulletList.js</span> <span class="ft-desc">— thin list wrapper (top slot to BulletFeed)</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">RightPanel.js</span> <span class="ft-desc">— AI analyst + protocol/chain TVL cards + WeeklyPanel + Related Stories</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">Sidebar.js</span> <span class="ft-desc">— left nav; manages data-sidebar + data-mobile-nav on html</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">Header.js</span> <span class="ft-desc">— server component; renders MobileMenuButton client island</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">MobileMenuButton.js</span> <span class="ft-desc">— client island: toggles data-mobile-nav on html</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">WeeklyMacro.js</span> <span class="ft-desc">— collapsible weekly macro banner above bullet feed</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">ThemeToggle.js</span> <span class="ft-desc">— client dark/light toggle; localStorage + data-theme on html</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">DetailsButton.js</span> <span class="ft-desc">— "AI Details" trigger inside BulletItem</span></span>
+
+      <span class="ft-dir" style="margin-top:8px;">web/app/api/</span>
+      <span class="ft-indent ft-file"><span class="ft-name">og/route.js</span> <span class="ft-desc">— social image generator: GET /api/og?date&amp;type&amp;bullets → 1080×1080 PNG via satori/next-og</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">details/route.js</span> <span class="ft-desc">— AI analyst context endpoint (OpenRouter, server-side)</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">related/route.js</span> <span class="ft-desc">— related stories: last 30 days of digests by entity/keyword</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">find-digest/route.js</span> <span class="ft-desc">— given title + week range, returns digest date for Key Stories links</span></span>
+
+      <span class="ft-dir" style="margin-top:8px;">web/lib/</span>
+      <span class="ft-indent ft-file"><span class="ft-name">db.js</span> <span class="ft-desc">— all Postgres queries: listDigests, getTvlSnapshot, getTvlWithChange, getGovernanceProposals, listWeeklyDigests, getWeeklyForDate, getBulletAnalyses</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">digest.js</span> <span class="ft-desc">— HTML → structured bullets parser</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">projects.js</span> <span class="ft-desc">— buildProjectHints() from defillama_protocols</span></span>
+      <span class="ft-indent ft-file"><span class="ft-name">prices.js</span> <span class="ft-desc">— BTC/ETH price + dominance from CoinGecko (5-min revalidate)</span></span>
+    </div>
+  </section>
+
+  <!-- ── DATABASE SCHEMA ── -->
+  <section id="schema">
+    <h2><span class="icon">🗄</span> Database Schema</h2>
+    <div class="schema-grid">
+      <div class="schema-card">
+        <h5>feed_items</h5>
+        <p>RSS ingestion store + semantic search</p>
+        <div class="schema-key">link UNIQUE, embedding vector(768)</div>
+      </div>
+      <div class="schema-card">
+        <h5>crypto_digest</h5>
+        <p>Daily digest history</p>
+        <div class="schema-key">date, content, model_used, trigger, error</div>
+      </div>
+      <div class="schema-card">
+        <h5>entity_memory</h5>
+        <p>Self-building entity knowledge base</p>
+        <div class="schema-key">slug PK, type, aliases[], summary, mention_count</div>
+      </div>
+      <div class="schema-card">
+        <h5>analyst_notes</h5>
+        <p>Post-digest theme extraction</p>
+        <div class="schema-key">date, notes, entity_updates JSONB</div>
+      </div>
+      <div class="schema-card">
+        <h5>defillama_tvl</h5>
+        <p>Chain TVL history</p>
+        <div class="schema-key">UNIQUE(date, chain)</div>
+      </div>
+      <div class="schema-card">
+        <h5>defillama_protocols</h5>
+        <p>Protocol TVL + metadata</p>
+        <div class="schema-key">slug UNIQUE, chain_tvls JSONB</div>
+      </div>
+      <div class="schema-card">
+        <h5>digest_bullet_analysis</h5>
+        <p>Pre-computed per-bullet AI views</p>
+        <div class="schema-key">UNIQUE(digest_date, title), analysis</div>
+      </div>
+      <div class="schema-card">
+        <h5>weekly_digest</h5>
+        <p>Weekly macro digest (HTML)</p>
+        <div class="schema-key">UNIQUE(week_start), content, rotation</div>
+      </div>
+      <div class="schema-card">
+        <h5>governance_proposals</h5>
+        <p>Active Snapshot DAO proposals</p>
+        <div class="schema-key">proposal_id UNIQUE, space_id, state, end_ts</div>
+      </div>
+      <div class="schema-card">
+        <h5>chat_history</h5>
+        <p>Per-chat conversation memory</p>
+        <div class="schema-key">chat_id, role, content</div>
+      </div>
+      <div class="schema-card">
+        <h5>ingest_run</h5>
+        <p>Ingest run history</p>
+        <div class="schema-key">started_at, inserted, embedded</div>
+      </div>
+      <div class="schema-card">
+        <h5>source_health</h5>
+        <p>Per-feed health tracking</p>
+        <div class="schema-key">url PK, consecutive_failures</div>
+      </div>
+      <div class="schema-card">
+        <h5>crypto_cache</h5>
+        <p>24h freshness cache for digest merge</p>
+        <div class="schema-key">last_run, last_analysis</div>
+      </div>
+      <div class="schema-card">
+        <h5>keyword_analysis</h5>
+        <p>Agent query history</p>
+        <div class="schema-key">keyword, chat_id, model_used</div>
+      </div>
+    </div>
+    <p style="font-size:12px; color: var(--text3);">Use <span class="inline-code">deploy/schema.sql</span> for fresh DB volumes. Migrations v2–v9 are already applied to the live DB.</p>
+  </section>
+
+  <!-- ── CONFIG TUNABLES ── -->
+  <section id="config">
+    <h2><span class="icon">⚙️</span> Config Tunables</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Variable</th><th>Default</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>DIGEST_CHAIN_DAYS</code></td><td>3</td><td>Days of past digests injected as chain context</td></tr>
+          <tr><td><code>ANALYST_NOTES_DAYS</code></td><td>7</td><td>Days of analyst notes injected into prompts</td></tr>
+          <tr><td><code>ENTITY_CONTEXT_LIMIT</code></td><td>10</td><td>Max entities in pre-digest context block</td></tr>
+          <tr><td><code>DIGEST_WINDOW_HOURS</code></td><td>24</td><td>Feed window for digest</td></tr>
+          <tr><td><code>DIGEST_LIMIT</code></td><td>200</td><td>Max feed items per digest</td></tr>
+          <tr><td><code>SEARCH_TOPK</code></td><td>40</td><td>Agent semantic search results</td></tr>
+          <tr><td><code>SEARCH_WINDOW_DAYS</code></td><td>30</td><td>Agent search lookback</td></tr>
+          <tr><td><code>IVFFLAT_PROBES</code></td><td>10</td><td>pgvector recall tuning</td></tr>
+          <tr><td><code>AGENT_MAX_STEPS</code></td><td>8</td><td>ReAct loop cap</td></tr>
+          <tr><td><code>MEMORY_WINDOW</code></td><td>20</td><td>Chat history turns loaded</td></tr>
+          <tr><td><code>OPENROUTER_MODELS</code></td><td>see config.py</td><td>Comma-separated fallback model list</td></tr>
+          <tr><td><code>CMC_API_KEY</code></td><td>—</td><td>CoinMarketCap key; CoinGecko used if absent</td></tr>
+          <tr><td><code>OPENROUTER_API_KEY</code></td><td>—</td><td>Required in both <code>bot</code> and <code>web</code> docker services</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size: 12px; color: var(--text3);">All env config is centralized in <span class="inline-code">config.py</span>. Never read <span class="inline-code">os.environ</span> anywhere else.</p>
+  </section>
+
+  <!-- ── RUNNING ── -->
+  <section id="running">
+    <h2><span class="icon">▶️</span> Running Locally</h2>
+    <div class="code-block">
+      <div class="code-header">
+        <span>bash · local dev</span>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+      <pre><span class="c"># Local dev (talks to live DB on 5433 + host Ollama)</span>
+python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+python -m app.ingest --dry-run         <span class="c"># fetch + filter, no DB write</span>
+python -m app.specialized "aave"       <span class="c"># test agent (needs OPENROUTER_API_KEY)</span>
+python -m app.digest --no-persist      <span class="c"># build digest without writing</span></pre>
+    </div>
+  </section>
+
+  <!-- ── DOCKER ── -->
+  <section id="docker">
+    <h2><span class="icon">🐳</span> Docker Commands</h2>
+    <div class="code-block">
+      <div class="code-header">
+        <span>bash · docker</span>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+      <pre><span class="c"># After app/ changes (Python)</span>
+docker compose build bot && docker compose up -d bot monitor
+
+<span class="c"># After web/ changes (Next.js)</span>
+docker compose build web && docker compose up -d web
+
+<span class="c"># After Caddyfile changes (MUST use --force-recreate)</span>
+docker compose up -d --force-recreate caddy
+
+<span class="c"># Tail logs</span>
+docker compose logs -f bot
+
+<span class="c"># DB shell</span>
+docker exec horyon-db psql -U crypto -d crypto</pre>
+    </div>
+    <div class="alert alert-yellow">
+      <div class="alert-icon">⚠️</div>
+      <div class="alert-body">
+        <strong>Caddy hot-apply:</strong> <code>Caddyfile</code> is bind-mounted by inode. Editing on host creates a new inode. Always use <code>--force-recreate caddy</code>.
+      </div>
+    </div>
+  </section>
+
+  <!-- ── MANUAL TRIGGERS ── -->
+  <section id="manual-triggers">
+    <h2><span class="icon">🔧</span> Manual Triggers</h2>
+    <div class="code-block">
+      <div class="code-header">
+        <span>bash · manual triggers</span>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+      <pre><span class="c"># DeFiLlama</span>
+docker exec horyon-bot python3 -c "from app.defillama import fetch_and_store; print(fetch_and_store(), 'rows')"
+docker exec horyon-bot python3 -c "from app.defillama import fetch_and_store_protocols; print(fetch_and_store_protocols(), 'rows')"
+
+<span class="c"># Entity warm-start</span>
+docker exec horyon-bot python3 -c "from app.db import seed_entities_from_protocols; print(seed_entities_from_protocols(), 'seeded')"
+
+<span class="c"># Weekly digest</span>
+docker exec horyon-bot python3 -m app.weekly                  <span class="c"># regenerate current week</span>
+docker exec horyon-bot python3 -m app.weekly --backfill       <span class="c"># fill all missing weeks (historical mode)</span>
+docker exec horyon-bot python3 -m app.weekly --no-persist     <span class="c"># dry-run, print to stdout</span>
+
+<span class="c"># Bullet analyses</span>
+docker exec horyon-bot python3 -m app.digest --regen-analyses
+docker exec horyon-bot python3 -m app.digest --regen-analyses --from-date 2026-05-20
+
+<span class="c"># Backfill all digests</span>
+docker exec horyon-bot python3 -m app.backfill_digests
+docker exec horyon-bot python3 -m app.backfill_digests --from-date 2026-05-20
+
+<span class="c"># Governance proposals</span>
+docker exec horyon-bot python3 -m app.snapshot</pre>
+    </div>
+  </section>
+
+  <!-- ── GOTCHAS ── -->
+  <section id="gotchas">
+    <h2><span class="icon">⚡</span> Conventions &amp; Gotchas</h2>
+    <div class="gotcha-box">
+      <div class="gotcha">
+        <div class="gotcha-title">Async + blocking</div>
+        <div class="gotcha-body">PTB is asyncio; all DB/LLM/Ollama calls are blocking. Always wrap in <code>asyncio.to_thread()</code> in handlers and cron jobs — never call blocking code directly from async context.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">LLM returns tuples</div>
+        <div class="gotcha-body"><code>llm.complete()</code> and <code>llm.run_agent()</code> return <code>(content, model_used)</code>. Always unpack both; callers record <code>model_used</code> to the DB.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">Telegram HTML only</div>
+        <div class="gotcha-body">Prompts emit <code>&lt;b&gt;</code>/<code>&lt;a&gt;</code> only. Always pass output through <code>telegram_html.sanitize()</code>. Never send raw model output to Telegram.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">pgvector recall</div>
+        <div class="gotcha-body"><code>db.search_feed()</code> sets <code>SET LOCAL ivfflat.probes</code>. Without it the 30-day filter returns ~1 result due to IVFFLAT's approximate nature.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">chain_tvls filtering</div>
+        <div class="gotcha-body"><code>defillama_protocols.chain_tvls</code> includes internal keys like <code>"Ethereum-borrowed"</code>. Frontend (<code>RightPanel.js</code>) filters out keys containing <code>"-"</code> or <code>"borrowed"</code> — keep this filter.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">Caddy hot-apply</div>
+        <div class="gotcha-body"><code>Caddyfile</code> is bind-mounted by inode. Editing on host creates a new inode. Always use <code>--force-recreate caddy</code>.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">app/ is baked into image</div>
+        <div class="gotcha-body">No volume mount on <code>app/</code>. After any Python change: <code>docker compose build bot && docker compose up -d bot monitor</code>.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">Intelligence layer is additive</div>
+        <div class="gotcha-body">Entity extraction and analyst scratchpad both fail silently (logged WARNING), never breaking the digest. <code>entity_memory</code> self-populates from ingest; warm-start with <code>seed_entities_from_protocols()</code>.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">Dedup context &amp; backfill</div>
+        <div class="gotcha-body"><code>db.get_digest_contents_for_dedup(days, before_date=None)</code> — the <code>before_date</code> param lets backfill look back from a specific date without reading future digests.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">Bullet analyses sync</div>
+        <div class="gotcha-body"><code>db.delete_bullet_analyses(date)</code> must be called before regenerating — otherwise stale rows accumulate. Backfill handles this automatically.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">OPENROUTER_API_KEY scope</div>
+        <div class="gotcha-body">Must be in docker-compose env for both <code>bot</code> AND <code>web</code> services. The web service uses it server-side only for <code>/api/details</code>.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">Weekly dedup</div>
+        <div class="gotcha-body"><code>WEEKLY_SYSTEM</code> prompt instructs the LLM not to repeat Key Stories from previous weeks unless there's a concrete new outcome (confirmed amounts, governance result, etc.).</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">Mobile sidebar stacking context</div>
+        <div class="gotcha-body"><code>.shell { position: fixed }</code> creates a CSS stacking context. The backdrop must be portalled into <code>.shell</code> (not <code>document.body</code>) via <code>createPortal</code> — otherwise it renders above the sidebar. Uses <code>position: absolute; z-index: 50</code> within shell (sidebar is z-index 102).</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">Snapshot verified spaces cache</div>
+        <div class="gotcha-body">Cached in a module-level variable for 24 h. Per-process — each container restart cold-fetches once. Do not make the spaces list configurable via DB; it's intentionally ephemeral.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">No n8n</div>
+        <div class="gotcha-body">Fully standalone — migrated off n8n. Do not reintroduce n8n tables, containers, or coupling.</div>
+      </div>
+      <div class="gotcha">
+        <div class="gotcha-title">next/og font format (TTF only)</div>
+        <div class="gotcha-body"><code>@vercel/og</code> bundled in Next.js 14.x only accepts TTF/OTF. woff2 throws <em>"Unsupported OpenType signature wOF2"</em>; woff throws the woff variant. Fetch fonts via <code>https://fonts.googleapis.com/css?family=Raleway:800</code> with <strong>no User-Agent header</strong> — Node's default UA triggers a <code>format('truetype')</code> response containing a real TTF URL. Setting a browser UA or old IE6 UA returns non-TTF formats that crash satori.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── VERIFYING ── -->
+  <section id="verifying">
+    <h2><span class="icon">✅</span> Verifying Changes</h2>
+    <ul>
+      <li><strong>/monitor</strong> — digest history, source health, TVL snapshot, entity/notes counts</li>
+      <li><strong><code>docker compose logs -f bot</code></strong> — live output; check for errors after first ingest post-deploy</li>
+      <li><strong>After Python changes</strong> — confirm first ingest cycle completes and entity extraction runs (look for <span class="inline-code">entity extraction: N entities upserted</span>)</li>
+      <li><strong>For Telegram changes</strong> — inject a synthetic <span class="inline-code">Update</span> via <span class="inline-code">process_update</span> rather than testing against the live webhook</li>
+    </ul>
+  </section>
+
+</main>
+
+<script>
+  // ── THEME TOGGLE ──
+  function toggleTheme() {
+    const html = document.documentElement;
+    html.dataset.theme = html.dataset.theme === 'dark' ? 'light' : 'dark';
+    localStorage.setItem('docs-theme', html.dataset.theme);
+  }
+  (function() {
+    const saved = localStorage.getItem('docs-theme');
+    if (saved) document.documentElement.dataset.theme = saved;
+  })();
+
+  // ── COPY BUTTON ──
+  function copyCode(btn) {
+    const pre = btn.closest('.code-block').querySelector('pre');
+    navigator.clipboard.writeText(pre.innerText).then(() => {
+      const orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = orig, 1500);
+    });
+  }
+
+  // ── ACTIVE NAV HIGHLIGHT ──
+  const sections = document.querySelectorAll('section[id]');
+  const navLinks = document.querySelectorAll('nav a');
+
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        navLinks.forEach(a => a.classList.remove('active'));
+        const active = document.querySelector(`nav a[href="#${entry.target.id}"]`);
+        if (active) active.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+
+  sections.forEach(s => observer.observe(s));
+</script>
+</body>
+</html>

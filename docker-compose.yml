@@ -1,0 +1,117 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: horyon-db
+    restart: always
+    environment:
+      POSTGRES_USER: crypto
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: crypto
+    ports:
+      - "5433:5432"
+    volumes:
+      - crypto_db:/var/lib/postgresql/data
+      - ./deploy/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crypto -d crypto"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  bot:
+    build: .
+    image: horyon
+    container_name: horyon-bot
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://crypto:${POSTGRES_PASSWORD}@db:5432/crypto
+      - CMC_API_KEY=${CMC_API_KEY:-}
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - WEBHOOK_LISTEN_HOST=0.0.0.0
+      - WEBHOOK_PORT=8080
+      # Podcast transcripts: yt-dlp uses these cookies to get past YouTube's
+      # datacenter-IP bot wall. Mounted read-only; yt-dlp copies to a temp jar per run.
+      - PODCAST_YTDLP_COOKIES=/secrets/cookies.txt
+    volumes:
+      - ./cookies.txt:/secrets/cookies.txt:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('localhost',8080),2)\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  monitor:
+    image: horyon
+    container_name: horyon-monitor
+    restart: always
+    command: python -m app.monitor
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://crypto:${POSTGRES_PASSWORD}@db:5432/crypto
+      - MONITOR_PORT=8090
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8090/healthz')\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: ./web
+      network: host
+    image: horyon-web
+    container_name: horyon-web
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql://crypto:${POSTGRES_PASSWORD}@db:5432/crypto
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENROUTER_MODEL=${OPENROUTER_MODELS}
+      - NIM_API_KEY=${NIM_API_KEY}
+      - NIM_BASE_URL=${NIM_BASE_URL:-https://integrate.api.nvidia.com/v1}
+      - NIM_MODELS=${NIM_MODELS}
+      - LLM_TIMEOUT_SEC=${LLM_TIMEOUT_SEC:-60}
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  caddy:
+    image: caddy:2
+    container_name: horyon-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile
+      - crypto_caddy:/data
+    depends_on:
+      - bot
+      - monitor
+      - web
+
+volumes:
+  crypto_db:
+  crypto_caddy:
