@@ -19,7 +19,7 @@ Best-effort throughout: any failure is logged, never raised — narrative rebuil
 must never break the digest that triggers it.
 
 CLI:
-  python -m app.narratives                 # rebuild now (default 14-day window)
+  python -m app.narratives                 # rebuild now (default 30-day window)
   python -m app.narratives --days 21       # wider window
   python -m app.narratives --no-persist    # print clusters, don't write
   python -m app.narratives --no-llm        # heuristic labels only (no LLM calls)
@@ -33,13 +33,18 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date as date_t, datetime, time, timedelta, timezone
 
-from . import config, db, embeddings, llm, prompts
+from . import config, db, embeddings, entities, llm, prompts
 
 log = logging.getLogger(__name__)
 
 # ── Tunables ────────────────────────────────────────────────────────────────
-WINDOW_DAYS = 14            # signal lookback
-MIN_SIGNALS = 2            # clusters below this are dropped as noise
+# A "narrative" is a theme that PERSISTS over weeks, not a 48-hour news burst. The
+# gates below enforce that: a wide lookback, ≥3 corroborating signals, and coverage
+# spread across ≥2 distinct days (a single-day cluster is one event, not a narrative).
+WINDOW_DAYS = 30           # signal lookback — wide enough to surface multi-week narratives
+MIN_SIGNALS = 3            # a real narrative needs ≥3 corroborating signals (not a 1-off)
+MIN_SPAN_DAYS = 2          # …spread across ≥2 distinct days (drops single-day news bursts)
+BASELINE_HOURS = 336       # momentum baseline window (14d): ρ = recent 48h vs multi-week trend
 COSINE_STRONG = 0.82       # embedding-only merge threshold
 COSINE_SUPPORT = 0.68      # embedding threshold when ≥1 shared entity
 MAX_LLM_SYNTHESES = 14     # cap LLM synthesis calls per rebuild
@@ -113,16 +118,10 @@ class _EntityMatcher:
                 type_ = e.get("type")
                 mentions = e.get("mention_count") or 0
                 for term in terms:
-                    if not term or term.startswith("@"):
-                        continue
-                    t = term.strip()
-                    long_enough = len(t) >= 4
-                    short_distinct = (
-                        3 <= len(t) <= 5 and " " not in t
-                        and type_ in ("protocol", "chain", "dao", "exchange", "fund")
-                        and mentions >= 10
-                    )
-                    if not (long_enough or short_distinct):
+                    t = (term or "").strip()
+                    # Shared gate kills generic vocabulary ("yield", "vault", …) so
+                    # it can never tag an unrelated entity (see entities.GENERIC_TERMS).
+                    if not entities.matchable_term(t, type_, mentions):
                         continue
                     esc = re.escape(t)
                     self.patterns.append((re.compile(r"\b" + esc + r"\b", re.I), slug))
@@ -319,7 +318,13 @@ def _cluster(signals: list[dict]) -> list[dict]:
                 n = best["n_vec"]
                 best["centroid"] = [(c0 * n + v0) / (n + 1) for c0, v0 in zip(best["centroid"], v)]
                 best["n_vec"] = n + 1
-    return [c for c in clusters if len(c["signals"]) >= MIN_SIGNALS]
+    # Keep only clusters that are both corroborated (≥ MIN_SIGNALS) AND temporally
+    # spread (signals on ≥ MIN_SPAN_DAYS distinct days) — the latter is what separates
+    # a persistent narrative from a single news day that happened to spawn 3 bullets.
+    def _distinct_days(c: dict) -> int:
+        return len({s["ts"].date() for s in c["signals"]})
+    return [c for c in clusters
+            if len(c["signals"]) >= MIN_SIGNALS and _distinct_days(c) >= MIN_SPAN_DAYS]
 
 
 # ── Momentum ─────────────────────────────────────────────────────────────────
@@ -334,9 +339,11 @@ def _momentum(cluster: dict, ref: datetime) -> dict:
         if age_h <= 48:
             R += m
             delta += 1
-        elif age_h <= 168:
+        elif age_h <= BASELINE_HOURS:
             older += m
-    B = older / 2.5
+    # Normalise the (48h, BASELINE_HOURS] baseline to a 48h-equivalent so ρ compares
+    # the recent burst against the sustained multi-week level, not just the prior 5 days.
+    B = older / max(1.0, (BASELINE_HOURS - 48) / 48.0)
     rho = (R + 1.0) / (B + 1.0)
 
     ts_all = [s["ts"] for s in sigs]

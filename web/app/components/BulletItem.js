@@ -58,35 +58,61 @@ function baseName(name) {
 }
 
 // Deduplicate by first word: shorter names win
-function buildEntities(chains, protocols) {
-  const raw = [
+// Merge chains + DeFiLlama protocols + entity_memory tags into ONE ranked list,
+// deduped by exact display name and by first word (≥4 chars) with the SHORTEST
+// display winning. Shortest-wins collapses sub-product / piggyback names onto the
+// clean parent ACROSS sources: a DeFiLlama "Morpho Blue"/"Kraken Bitcoin"/"Coinbase
+// Bridge" folds onto the entity_memory "Morpho"/"Kraken"/"Coinbase"; "Aave V3" + "Aave"
+// → "Aave". Without this the ugly DeFiLlama sub-product wins the slot (MAX_ENTITIES=3)
+// and crowds out the real name.
+const KIND_RANK = { chain: 0, proto: 1, mem: 2 };
+
+function pickBetter(a, b) {
+  if (a.display.length !== b.display.length) return a.display.length < b.display.length ? a : b;
+  if (!!a.logo !== !!b.logo) return a.logo ? a : b;
+  return KIND_RANK[a.kind] <= KIND_RANK[b.kind] ? a : b;
+}
+
+function buildEntities(chains, protocols, entityTags = []) {
+  const cand = [
     ...chains.map(c => ({
-      key:     `c:${c.name}`,
-      name:    c.name,
-      display: c.name,
-      logo:    `https://icons.llamao.fi/icons/chains/rsz_${c.name.toLowerCase()}.jpg`,
-      url:     c.url || null,
-      isChain: true,
+      kind: "chain", key: `c:${c.name}`, name: c.name, display: c.name,
+      logo: `https://icons.llamao.fi/icons/chains/rsz_${c.name.toLowerCase()}.jpg`,
+      url:  c.url || null,
     })),
     ...protocols.map(p => ({
-      key:     `p:${p.name}`,
-      name:    p.name,
-      display: baseName(p.name),
-      logo:    p.logo_url || null,
-      url:     p.url || (p.slug ? `https://defillama.com/protocol/${p.slug}` : null),
-      isChain: false,
+      kind: "proto", key: `p:${p.name}`, name: p.name, display: baseName(p.name),
+      logo: p.logo_url || null,
+      url:  p.url || (p.slug ? `https://defillama.com/protocol/${p.slug}` : null),
+    })),
+    ...entityTags.map(e => ({
+      kind: "mem", key: `em:${e.slug}`, name: e.name, display: e.name,
+      logo: e.logo || null, url: e.url || null, isMemoryOnly: e.isMemoryOnly,
     })),
   ];
 
-  raw.sort((a, b) => a.display.length - b.display.length);
-
-  const seenFirstWord = new Set();
+  const byName = new Map();   // display(lower) → out index
+  const byFirst = new Map();  // first word     → out index
   const out = [];
-  for (const item of raw) {
-    const fw = item.display.split(/\s+/)[0].toLowerCase();
-    if (!seenFirstWord.has(fw)) {
-      seenFirstWord.add(fw);
-      out.push(item);
+  for (const c of cand) {
+    const dispLC = c.display.toLowerCase();
+    if (byName.has(dispLC)) continue;
+    const fw = dispLC.split(/\s+/)[0];
+    const hasFw = fw.length >= 4;
+    const prevIdx = hasFw ? byFirst.get(fw) : undefined;
+    if (prevIdx === undefined) {
+      out.push(c);
+      const idx = out.length - 1;
+      byName.set(dispLC, idx);
+      if (hasFw) byFirst.set(fw, idx);
+      continue;
+    }
+    const prev = out[prevIdx];
+    const winner = pickBetter(prev, c);
+    if (winner !== prev) {
+      byName.delete(prev.display.toLowerCase());
+      out[prevIdx] = winner;
+      byName.set(winner.display.toLowerCase(), prevIdx);
     }
   }
   return out;
@@ -154,89 +180,52 @@ function ScoreRing({ score }) {
 // ── Inline tags — entity names + category chips, visible at all sizes ─────
 function InlineTags({ data, onTagSearch, sourceCount, timeNode }) {
   const { protocols = [], chains = [], entityTags = [] } = data || {};
-  const all      = buildEntities(chains, protocols);
-  const visible  = all.slice(0, MAX_ENTITIES);
-  const overflow = all.length - MAX_ENTITIES;
+  // One unified, first-word-deduped list across chains + DeFiLlama + entity_memory.
+  const merged   = buildEntities(chains, protocols, entityTags);
+  const visible  = merged.slice(0, MAX_ENTITIES);
+  const overflow = merged.length - MAX_ENTITIES;
   const cats = [...new Set(
     protocols.map(p => p.category).filter(Boolean).filter(c => !BRIDGE_CAT.test(c))
   )];
 
-  // Deduplicate entity_memory tags against DeFiLlama entries:
-  // - exact name match ("Aave" already shown → skip "Aave")
-  // - first-word match ("Aave" shown → skip "Aave Labs", "Aave V3", etc.)
-  //   only apply when the first word is ≥ 4 chars to avoid over-filtering on short words
-  const shownNames = new Set(visible.map(e => e.display.toLowerCase()));
-  const shownFirstWords = new Set(
-    visible
-      .map(e => e.display.toLowerCase().split(/\s+/)[0])
-      .filter(w => w.length >= 4)
-  );
-  const extraEntities = entityTags.filter(e => {
-    const nameLC = e.name.toLowerCase();
-    const fw = nameLC.split(/\s+/)[0];
-    return !shownNames.has(nameLC) && !shownFirstWords.has(fw);
-  });
-  // cap total tags at MAX_ENTITIES across both sources
-  const remainingSlots = Math.max(0, MAX_ENTITIES - visible.length);
-  const visibleExtra = extraEntities.slice(0, remainingSlots);
-
   const showSources = sourceCount != null && sourceCount >= 2;
-  if (!visible.length && !visibleExtra.length && !cats.length && !showSources && !timeNode) return null;
+  if (!visible.length && !cats.length && !showSources && !timeNode) return null;
 
   return (
     <div className="bullet-inline-tags">
-      {visible.map(item => (
-        <span
-          key={item.key}
-          className={`entity-tag${item.isChain ? " entity-tag--chain" : ""}`}
-          role="button"
-          tabIndex={0}
-          title={item.name}
-          onClick={e => { e.stopPropagation(); onTagSearch?.(item.display); }}
-          onKeyDown={e => (e.key === "Enter" || e.key === " ") && (e.stopPropagation(), onTagSearch?.(item.display))}
-          aria-label={`Search ${item.display}`}
-        >
-          {item.logo && (
-            <img src={item.logo} alt="" className="entity-logo"
-              onError={e => { e.currentTarget.style.display = "none"; }} />
-          )}
-          <span className="entity-name">{item.display}</span>
-          {item.url && (
-            <a href={item.url} target="_blank" rel="noopener noreferrer"
-               className="entity-tag-ext"
-               onClick={e => e.stopPropagation()}
-               aria-label={`Open ${item.name}`}>
-              <ExtLinkIcon />
-            </a>
-          )}
-        </span>
-      ))}
-      {visibleExtra.map(e => (
-        <span
-          key={`em:${e.slug}`}
-          className={`entity-tag entity-tag--memory${e.isMemoryOnly ? " entity-tag--no-logo" : ""}`}
-          role="button"
-          tabIndex={0}
-          title={e.name}
-          onClick={ev => { ev.stopPropagation(); onTagSearch?.(e.name); }}
-          onKeyDown={ev => (ev.key === "Enter" || ev.key === " ") && (ev.stopPropagation(), onTagSearch?.(e.name))}
-          aria-label={`Search ${e.name}`}
-        >
-          {e.logo && (
-            <img src={e.logo} alt="" className="entity-logo"
-              onError={ev => { ev.currentTarget.style.display = "none"; }} />
-          )}
-          <span className="entity-name">{e.name}</span>
-          {e.url && (
-            <a href={e.url} target="_blank" rel="noopener noreferrer"
-               className="entity-tag-ext"
-               onClick={ev => ev.stopPropagation()}
-               aria-label={`Open ${e.name}`}>
-              <ExtLinkIcon />
-            </a>
-          )}
-        </span>
-      ))}
+      {visible.map(item => {
+        const cls = item.kind === "chain"
+          ? " entity-tag--chain"
+          : item.kind === "mem"
+            ? ` entity-tag--memory${item.isMemoryOnly ? " entity-tag--no-logo" : ""}`
+            : "";
+        return (
+          <span
+            key={item.key}
+            className={`entity-tag${cls}`}
+            role="button"
+            tabIndex={0}
+            title={item.name}
+            onClick={e => { e.stopPropagation(); onTagSearch?.(item.display); }}
+            onKeyDown={e => (e.key === "Enter" || e.key === " ") && (e.stopPropagation(), onTagSearch?.(item.display))}
+            aria-label={`Search ${item.display}`}
+          >
+            {item.logo && (
+              <img src={item.logo} alt="" className="entity-logo"
+                onError={e => { e.currentTarget.style.display = "none"; }} />
+            )}
+            <span className="entity-name">{item.display}</span>
+            {item.url && (
+              <a href={item.url} target="_blank" rel="noopener noreferrer"
+                 className="entity-tag-ext"
+                 onClick={e => e.stopPropagation()}
+                 aria-label={`Open ${item.name}`}>
+                <ExtLinkIcon />
+              </a>
+            )}
+          </span>
+        );
+      })}
       {overflow > 0 && <span className="entity-overflow">+{overflow}</span>}
       {showSources && (
         <span className="bullet-sources">

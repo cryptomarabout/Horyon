@@ -3,6 +3,7 @@
 import { useState, useMemo } from "react";
 import RightPanel from "./RightPanel";
 import MomentumChip from "./MomentumChip";
+import NarrativeViewToggle from "./NarrativeViewToggle";
 import { stateMeta, evidenceCounts } from "../../lib/narratives";
 import useHeaderSearch from "../../lib/useHeaderSearch";
 
@@ -79,7 +80,7 @@ export default function NarrativeView({ narratives = [] }) {
     <div className="feed-grid">
       <div className="feed-left">
         <div className="feed-scroll">
-          <div className="view-head">
+          <div className="view-head view-head--row">
             <div className="view-head-titles">
               <h1 className="view-title">Active Narratives</h1>
               <p className="view-sub">
@@ -87,6 +88,7 @@ export default function NarrativeView({ narratives = [] }) {
                 {heatingCount > 0 && <> · <span className="view-sub-hot">{heatingCount} heating</span></>}
               </p>
             </div>
+            <NarrativeViewToggle />
           </div>
 
           {narratives.length === 0 ? (

@@ -223,6 +223,24 @@ def get_feed_items_for_date(target_date: date_t, limit: int = 200) -> list[dict]
         return cur.fetchall()
 
 
+def get_feed_items_since(days: int, limit: int = 40000) -> list[dict]:
+    """Feed items from the last `days` days (by pub_date, fallback ingested_at) — for the
+    entity co-occurrence graph. Returns content + ts only, newest first."""
+    with _conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT content, link, COALESCE(pub_date, ingested_at) AS ts
+            FROM feed_items
+            WHERE COALESCE(pub_date, ingested_at) >= now() - make_interval(days => %s)
+              AND content IS NOT NULL AND content <> ''
+            ORDER BY COALESCE(pub_date, ingested_at) DESC
+            LIMIT %s
+            """,
+            (days, limit),
+        )
+        return cur.fetchall()
+
+
 def get_cache() -> tuple[object | None, str]:
     with _conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT last_run, last_analysis FROM crypto_cache LIMIT 1")
@@ -1325,6 +1343,10 @@ def replace_narratives(narratives: list[dict], signals: dict) -> int:
     signals: {slug: [{signal_type, signal_ref, title, body, url, importance, ts}]}
     """
     with _conn() as conn, conn.cursor() as cur:
+        # Serialize concurrent full rebuilds (post-digest orchestration vs the 3h cron
+        # vs a manual CLI run) — without this, two overlapping DELETE+INSERT cycles on
+        # the same tables deadlock or hit duplicate-slug errors. Auto-released on commit.
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (91237465,))
         cur.execute("DELETE FROM narratives")
         for n in narratives:
             centroid = n.get("centroid")
@@ -1360,3 +1382,24 @@ def replace_narratives(narratives: list[dict], signals: dict) -> int:
                     template="(%s, %s, %s, %s, %s, %s, %s, %s::timestamptz)",
                 )
     return len(narratives)
+
+
+# ── Entity co-occurrence graph ────────────────────────────────────────────────
+def replace_entity_edges(edges: list[dict]) -> int:
+    """Full-rebuild of entity_edges: wipe + bulk insert. Caller guarantees slug_a<slug_b.
+    edges: [{slug_a, slug_b, weight, last_seen, npmi, examples}]
+    npmi = association strength (down-weights ubiquitous hubs); examples = up to 3
+    {link, ts, snippet} JSON evidence rows behind the link."""
+    import json as _json
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM entity_edges")
+        if edges:
+            execute_values(
+                cur,
+                "INSERT INTO entity_edges (slug_a, slug_b, weight, last_seen, npmi, examples) VALUES %s",
+                [(e["slug_a"], e["slug_b"], int(e["weight"]), e.get("last_seen"),
+                  e.get("npmi"), _json.dumps(e.get("examples") or []))
+                 for e in edges],
+                template="(%s, %s, %s, %s::timestamptz, %s, %s::jsonb)",
+            )
+    return len(edges)

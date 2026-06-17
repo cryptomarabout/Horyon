@@ -219,6 +219,8 @@ RightPanel (client)
 | `digest_bullet_analysis` | UNIQUE(digest_date, title), analysis | Pre-computed per-bullet AI views |
 | `weekly_digest` | UNIQUE(week_start), content, rotation | Weekly macro digest (HTML) |
 | `governance_proposals` | proposal_id (UNIQUE), space_id, state, end_ts | Active Snapshot DAO proposals |
+| `narratives` / `narrative_signals` | slug (PK), state, entity_slugs[], momentum_ratio | Narrative clusters + evidence |
+| `entity_edges` | PK(slug_a<slug_b), weight, npmi, examples jsonb | Entity co-occurrence graph (web Entity Map): raw count + affinity + evidence |
 | `keyword_analysis` | keyword, chat_id, model_used | Agent query history |
 | `chat_history` | chat_id, role, content | Per-chat conversation memory |
 | `ingest_run` | started_at, inserted, embedded | Ingest run history |

@@ -267,3 +267,19 @@ CREATE TABLE IF NOT EXISTS narrative_signals (
 );
 CREATE INDEX IF NOT EXISTS narrative_signals_slug_idx ON narrative_signals (narrative_slug);
 CREATE INDEX IF NOT EXISTS narrative_signals_ts_idx   ON narrative_signals (ts DESC);
+
+-- Entity co-occurrence graph: two entities linked when mentioned in the same feed
+-- item. Full-rebuild precompute (app/entity_graph.py, cron) over the last N days.
+-- slug_a < slug_b (undirected, deduped). weight = #items the pair co-occurred in.
+CREATE TABLE IF NOT EXISTS entity_edges (
+    slug_a    text        NOT NULL,
+    slug_b    text        NOT NULL,
+    weight    integer     NOT NULL DEFAULT 0,  -- raw co-mention count
+    npmi      real,                            -- association strength ∈ [-1,1] (down-weights hubs)
+    examples  jsonb       NOT NULL DEFAULT '[]'::jsonb,  -- ≤3 {link, ts, snippet} evidence rows
+    last_seen timestamptz,
+    PRIMARY KEY (slug_a, slug_b)
+);
+CREATE INDEX IF NOT EXISTS entity_edges_a_idx      ON entity_edges (slug_a);
+CREATE INDEX IF NOT EXISTS entity_edges_b_idx      ON entity_edges (slug_b);
+CREATE INDEX IF NOT EXISTS entity_edges_weight_idx ON entity_edges (weight DESC);

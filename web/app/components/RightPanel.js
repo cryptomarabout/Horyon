@@ -483,9 +483,12 @@ function parseTelegramLines(html) {
 
 // ── Search panel ───────────────────────────────────────────────────────────
 function SearchPanel({ search }) {
-  const { keyword, state, result, sources, onClose } = search;
+  const { keyword, state, result, sources, synth, synthState, onClose } = search;
   const lines = parseTelegramLines(result);
   const bullets = lines.filter(l => l.type === "bullet");
+  const synthLines   = parseTelegramLines(synth || "");
+  const synthBullets = synthLines.filter(l => l.type === "bullet");
+  const hasSynthSection = synthState === "loading" || synthBullets.length > 0;
 
   return (
     <>
@@ -534,6 +537,40 @@ function SearchPanel({ search }) {
                   {bullets.length} updates · last 30 days
                 </span>
               </div>
+            )}
+
+            {/* Analyst synthesis (entity click) — streams in above the feed */}
+            {synthState === "loading" && (
+              <div className="search-synth-loading" aria-live="polite" aria-busy="true">
+                <span className="search-synth-spinner" aria-hidden="true" />
+                Synthesizing analyst view…
+              </div>
+            )}
+            {synthBullets.length > 0 && (
+              <div className="search-synth">
+                <div className="panel-section-label">Analyst View</div>
+                <div className="search-bullet-list">
+                  {synthLines.map((item, i) =>
+                    item.type === "bullet" ? (
+                      <div
+                        key={`s${i}`}
+                        className="search-bullet"
+                        style={{ "--i": synthBullets.indexOf(item) }}
+                      >
+                        <span className="search-bullet-dot" aria-hidden="true">•</span>
+                        <span
+                          className="search-bullet-body"
+                          dangerouslySetInnerHTML={{ __html: item.html }}
+                        />
+                      </div>
+                    ) : null
+                  )}
+                </div>
+              </div>
+            )}
+
+            {hasSynthSection && (
+              <div className="panel-section-label" style={{ marginTop: "4px" }}>Recent mentions</div>
             )}
 
             {/* Bullet list */}

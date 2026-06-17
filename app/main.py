@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram.constants import ParseMode
@@ -66,10 +66,25 @@ async def _post_init(app: Application) -> None:
             except TelegramError:
                 log.exception("failed to send daily digest to chat_id=%s", chat_id)
 
-        # Refresh weekly digest for the current week in the background (non-blocking).
-        # This gives the web UI an up-to-date weekly with today's data included.
+        # Refresh the weekly digest for the current (in-progress) week in the background so
+        # the web /weekly preview includes today's data. Skip until the week has ≥2 daily
+        # digests — a fresh Monday otherwise rebuilds a pointless 1-day "weekly" (and burns
+        # a full macro-LLM call). The Monday Telegram send reads last week, not this one.
         async def _do_weekly_update() -> None:
+            from . import db as _db
+            from datetime import date as _date, timedelta as _td
             try:
+                today = _date.today()
+                week_start = today - _td(days=today.weekday())
+                n_days = await asyncio.to_thread(
+                    lambda: len(_db.get_digests_for_range(week_start, today))
+                )
+                if n_days < 2:
+                    log.info(
+                        "weekly update: only %d daily digest(s) this week — skipping rebuild",
+                        n_days,
+                    )
+                    return
                 await asyncio.to_thread(lambda: weekly_mod.run_weekly(trigger="daily_update"))
                 log.info("weekly update complete")
             except Exception:
@@ -130,7 +145,7 @@ async def _post_init(app: Application) -> None:
         id="protocols_poll",
         max_instances=1,
         coalesce=True,
-        next_run_time=datetime.now(timezone.utc),
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=60),
     )
 
     async def _snapshot_cron() -> None:
@@ -148,7 +163,7 @@ async def _post_init(app: Application) -> None:
         id="snapshot_poll",
         max_instances=1,
         coalesce=True,
-        next_run_time=datetime.now(timezone.utc),
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=90),
     )
 
     async def _podcast_cron() -> None:
@@ -166,7 +181,7 @@ async def _post_init(app: Application) -> None:
         id="podcast_ingest",
         max_instances=1,
         coalesce=True,
-        next_run_time=datetime.now(timezone.utc),
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=180),
     )
 
     async def _narratives_cron() -> None:
@@ -186,24 +201,65 @@ async def _post_init(app: Application) -> None:
         id="narratives_rebuild",
         max_instances=1,
         coalesce=True,
-        next_run_time=datetime.now(timezone.utc),
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=300),
+    )
+
+    async def _entity_graph_cron() -> None:
+        """Rebuild the entity co-occurrence graph (entity_edges) read by the web map.
+        Heavy scan over recent feed items → kept off the request path on a slow cron."""
+        from . import entity_graph
+        try:
+            stats = await asyncio.to_thread(entity_graph.build_and_store)
+            log.info("entity_graph cron: %s", stats)
+        except Exception:
+            log.exception("entity_graph cron failed")
+
+    _scheduler.add_job(
+        _entity_graph_cron,
+        "interval",
+        hours=6,
+        id="entity_graph_rebuild",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=480),
     )
 
     async def _weekly_tg_cron() -> None:
-        """Monday only: fetch the current week's digest from DB and send to Telegram.
-        The content is already up-to-date (refreshed daily by _do_weekly_update).
+        """Monday only: send the report for the week that JUST ENDED (last Mon–Sun).
+
+        The daily cron's `_do_weekly_update` rebuilds the *current* (in-progress) week
+        every day for the web preview — so on Monday morning the current-week row only
+        holds Monday's single daily digest. The Telegram report must instead cover the
+        completed previous week, which already has all 7 days. We look it up by yesterday
+        (Sunday); if it's somehow missing we build it on the spot before sending.
         """
-        from . import db as _db
-        from datetime import date as _date
+        from . import db as _db, weekly as _weekly
+        from datetime import date as _date, timedelta as _timedelta
         log.info("weekly TG send starting")
+        today = _date.today()
+        last_sunday = today - _timedelta(days=1)   # the completed week ends yesterday
         try:
-            today = _date.today()
-            row = await asyncio.to_thread(lambda: _db.get_weekly_for_date(today))
+            row = await asyncio.to_thread(lambda: _db.get_weekly_for_date(last_sunday))
         except Exception:
             log.exception("weekly TG: failed to fetch digest from DB")
             return
         if not row or not row.get("content"):
-            log.warning("weekly TG: no digest found for current week")
+            log.warning(
+                "weekly TG: no digest for the week ending %s — building it now", last_sunday
+            )
+            last_monday = today - _timedelta(days=7)
+            try:
+                await asyncio.to_thread(
+                    lambda: _weekly.run_weekly(
+                        trigger="cron", week_start=last_monday, week_end=last_sunday
+                    )
+                )
+                row = await asyncio.to_thread(lambda: _db.get_weekly_for_date(last_sunday))
+            except Exception:
+                log.exception("weekly TG: fallback build failed")
+                return
+        if not row or not row.get("content"):
+            log.warning("weekly TG: still no digest for week ending %s — skipping", last_sunday)
             return
         html = row["content"]
         chunks = split_message(html) or ["(empty weekly digest)"]
@@ -223,7 +279,7 @@ async def _post_init(app: Application) -> None:
         "cron",
         day_of_week="mon",
         hour=7,
-        minute=45,   # 07:45 UTC — after daily (07:00) + weekly update (~07:30)
+        minute=45,   # 07:45 UTC — after the daily digest (07:00) + its weekly refresh
         id="weekly_tg_send",
         max_instances=1,
         coalesce=True,
@@ -231,7 +287,7 @@ async def _post_init(app: Application) -> None:
 
     _scheduler.start()
     log.info(
-        "scheduler started: ingest every %d min, daily digest 07:00 UTC, weekly digest Mon 07:30 UTC",
+        "scheduler started: ingest every %d min, daily digest 07:00 UTC, weekly TG send Mon 07:45 UTC",
         config.INGEST_INTERVAL_MIN,
     )
 

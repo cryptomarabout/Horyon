@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { pool, getEntityIntelBrief } from "../../../lib/db";
-import { chatCreate } from "../../../lib/llm";
+import { chatCreate, chatComplete } from "../../../lib/llm";
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST || "http://host.docker.internal:11434";
 const EMBED_MODEL = process.env.EMBED_MODEL || "nomic-embed-text";
@@ -117,6 +117,28 @@ async function searchFeedRows(kw) {
   }
 }
 
+// Recent feed items that actually MENTION the entity (word-boundary on its most
+// distinctive token), newest first. Precise + fast — unlike pure vector recall, which
+// surfaced irrelevant "GM 🟢" noise for short entity names like "Venus Core Pool".
+async function entityFeedRows(kw) {
+  const token = (kw.split(/\s+/)
+    .map(w => w.replace(/[^a-z0-9.+]/gi, ""))
+    .filter(w => w.length >= 3)
+    .sort((a, b) => b.length - a.length)[0]) || "";
+  if (!token) return [];
+  const esc = token.replace(/\./g, "[.]").replace(/\+/g, "[+]");
+  const { rows } = await pool.query(
+    `SELECT content, link, creator, pub_date, source_type
+     FROM feed_items
+     WHERE COALESCE(pub_date, ingested_at) >= now() - INTERVAL '30 days'
+       AND content ~* ('\\y' || $1 || '\\y')
+     ORDER BY COALESCE(pub_date, ingested_at) DESC
+     LIMIT 8`,
+    [esc]
+  );
+  return rows;
+}
+
 function formatFeedRows(rows) {
   if (!rows.length) return "No matching feed items in the last 30 days.";
   return rows
@@ -130,6 +152,58 @@ function formatFeedRows(rows) {
       return `[${r.source_type || "feed"}] ${r.creator || ""} (${when})\n${text}\nLINK: ${r.link || ""}`;
     })
     .join("\n\n---\n\n");
+}
+
+const escapeHtml = s =>
+  String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// One-shot analyst synthesis over an entity's recent feed items (NOT the multi-step
+// ReAct agent). Telegram-HTML bullets, grounded strictly in the supplied items.
+const SYNTH_SYSTEM = `You are a crypto-native DeFi analyst. Given recent feed items about ONE entity, write a tight intel brief.
+
+OUTPUT (Telegram HTML only — <b> and <a> tags, NO markdown, no \`\`\`, no **):
+🔎 <b>{entity}</b>
+
+• <b>Short take</b> — what is happening and why it matters. <a href="url">🔗</a>
+(3–5 bullets, each grounded in an item below, each with a link that appears verbatim in the items)
+
+RULES:
+- GROUNDING: use ONLY the items below. Never invent items, numbers, dates, or URLs.
+- Lead with the most important development; synthesize, don't just restate headlines.
+- If the items are thin or off-topic, say so in one bullet. No padding, no disclaimers.`;
+
+async function synthesizeEntity(kw, rows) {
+  if (!rows.length) return "";
+  const context = formatFeedRows(rows);
+  const { content } = await chatComplete({
+    system: SYNTH_SYSTEM,
+    user: `Entity: ${kw}\n\nRecent feed items (last 30 days):\n\n${context}`,
+    max_tokens: 600,
+    temperature: 0.4,
+  });
+  return (content || "").trim();
+}
+
+// Fast, NO-LLM rendering of the top feed matches as Telegram-HTML bullets. Used for
+// entity-tag clicks when no pre-computed brief exists — returns in ~1-2s instead of
+// the 30s+ ReAct agent (which felt like an infinite spinner).
+function formatFeedBullets(rows, kw) {
+  const seen = new Set();
+  const bullets = [];
+  for (const r of rows) {
+    if (r.link && seen.has(r.link)) continue;
+    if (r.link) seen.add(r.link);
+    const text = (r.content || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    const head = (r.creator || r.source_type || "feed").trim();
+    const link = r.link ? ` <a href="${r.link}">🔗</a>` : "";
+    bullets.push(`• <b>${escapeHtml(head)}</b> — ${escapeHtml(text.slice(0, 180))}${link}`);
+    if (bullets.length >= 7) break;
+  }
+  if (!bullets.length) {
+    return `🔎 <b>${escapeHtml(kw)}</b>\n\nNo recent feed items in the last 30 days.`;
+  }
+  return `🔎 <b>${escapeHtml(kw)}</b>\n\n${bullets.join("\n")}`;
 }
 
 async function runSearchFeedTool(keyword) {
@@ -213,16 +287,48 @@ async function buildAnalystNotes() {
 
 // ── Main handler ──────────────────────────────────────────────────────────
 export async function POST(req) {
-  let kw;
+  let kw, entityMode, mode;
   try {
     const body = await req.json();
     kw = (body?.keyword || "").trim();
+    entityMode = !!body?.entity;   // entity-tag click vs free-text search-bar query
+    mode = body?.mode || "feed";   // entity mode only: "feed" (fast) | "synth" (LLM/brief)
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
   if (!kw) return NextResponse.json({ error: "keyword required" }, { status: 400 });
 
-  // Fast path: return pre-computed entity brief if one exists (updated within last 7 days)
+  // ── Entity-tag click ────────────────────────────────────────────────────
+  // Two phases drive a progressive UI (see BulletFeed.handleSearch): "feed" renders
+  // instantly (no LLM); "synth" streams in above it — the pre-computed brief if one
+  // exists, else a SINGLE LLM call over the same feed (never the 8-step ReAct agent,
+  // which took 30s+ on NIM cold-start and was the forever-spinner).
+  if (entityMode) {
+    if (mode === "synth") {
+      const brief = await getEntityIntelBrief(kw);
+      if (brief?.brief_html) {
+        return NextResponse.json({ content: brief.brief_html, sources: 0, cached: true });
+      }
+      try {
+        const rows  = await entityFeedRows(kw);
+        const synth = await synthesizeEntity(kw, rows);
+        return NextResponse.json({ content: synth, sources: rows.length });
+      } catch (e) {
+        console.error("[search] entity synth error:", e?.message ?? e);
+        return NextResponse.json({ content: "", sources: 0 });
+      }
+    }
+    try {
+      const rows = await entityFeedRows(kw);
+      return NextResponse.json({ content: formatFeedBullets(rows, kw), sources: rows.length });
+    } catch (e) {
+      console.error("[search] entity feed error:", e?.message ?? e);
+      return NextResponse.json(
+        { content: `🔎 <b>${escapeHtml(kw)}</b>\n\nNo data available right now.`, sources: 0 });
+    }
+  }
+
+  // ── Free-text search bar: pre-computed brief shortcut, else the full ReAct agent ──
   const cachedBrief = await getEntityIntelBrief(kw);
   if (cachedBrief?.brief_html) {
     return NextResponse.json({ content: cachedBrief.brief_html, sources: 0 });

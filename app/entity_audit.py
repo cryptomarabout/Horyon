@@ -28,6 +28,42 @@ def _norm(s: str) -> str:
     return _NORM_RE.sub("", s.lower())
 
 
+# Trailing org/generic tokens that denote the SAME entity:
+# "Aerodrome Finance" == "Aerodrome", "NEAR Protocol" == "NEAR", "BNB Chain" == "BNB".
+_SUFFIX_TOKENS = {"protocol", "network", "finance", "labs", "lab",
+                  "money", "foundation", "chain"}
+_MERGE_SPLIT = re.compile(r"[-\s_.]+")
+
+
+def _merge_key(name: str) -> str:
+    """Stronger dedup key: drop trailing generic suffix tokens before normalising,
+    so version/suffix variants collapse together (but distinct cores stay apart)."""
+    toks = [t for t in _MERGE_SPLIT.split((name or "").lower()) if t]
+    while len(toks) > 1 and toks[-1] in _SUFFIX_TOKENS:
+        toks.pop()
+    return "".join(toks) or _norm(name)
+
+
+# Curated cross-form equivalences the heuristic can't see (ticker / abbreviation
+# == project). Each set is folded into one node. Keep these verified + conservative.
+_EXPLICIT_MERGES = [
+    {"bsc", "bnb-chain"},
+    {"aero", "aerodrome", "aerodrome-finance"},
+    {"hyperliquid", "hype"},
+]
+
+
+def _defillama_slugs() -> set[str]:
+    """Slugs present in defillama_protocols — preferred as the surviving canonical
+    so the entity keeps its TVL + logo join after a merge."""
+    try:
+        with db._conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT slug FROM defillama_protocols")
+            return {r[0] for r in cur.fetchall()}
+    except Exception:
+        return set()
+
+
 # --------------------------------------------------------------------------- #
 # Stats
 # --------------------------------------------------------------------------- #
@@ -154,14 +190,35 @@ def cmd_merge(dry_run: bool = False) -> None:
         """)
         rows = cur.fetchall()
 
-    # Group by normalised name
-    groups: dict[str, list] = defaultdict(list)
+    dl_slugs = _defillama_slugs()
+    by_slug: dict[str, dict] = {}
     for slug, name, type_, aliases, mc, th, summary in rows:
-        groups[_norm(name)].append({
+        by_slug[slug] = {
             "slug": slug, "name": name, "type": type_,
             "aliases": list(aliases or []),
             "mention_count": mc, "twitter_handle": th, "summary": summary,
-        })
+        }
+
+    # Cluster key = (type, suffix-stripped name). Same-type guard prevents folding
+    # an exchange into a fund (e.g. Coinbase ≠ Coinbase Ventures).
+    cluster_of: dict[str, str] = {
+        s: f"{m['type']}::{_merge_key(m['name'])}" for s, m in by_slug.items()
+    }
+    # Fold curated explicit equivalences into a single shared cluster id.
+    for grp in _EXPLICIT_MERGES:
+        present = [s for s in grp if s in cluster_of]
+        if len(present) > 1:
+            target = cluster_of[present[0]]
+            for s in present:
+                old = cluster_of[s]
+                if old != target:
+                    for s2, k in list(cluster_of.items()):
+                        if k == old:
+                            cluster_of[s2] = target
+
+    groups: dict[str, list] = defaultdict(list)
+    for slug, key in cluster_of.items():
+        groups[key].append(by_slug[slug])
 
     # Only groups with duplicates
     dupes = {k: v for k, v in groups.items() if len(v) > 1}
@@ -170,8 +227,9 @@ def cmd_merge(dry_run: bool = False) -> None:
     merged = 0
     removed = 0
     for norm_name, members in dupes.items():
-        # Canonical = highest mention_count; break ties alphabetically
-        members.sort(key=lambda m: (-m["mention_count"], m["slug"]))
+        # Canonical = prefer a slug that exists in defillama_protocols (keeps TVL +
+        # logo join), then highest mention_count, then alphabetical for stability.
+        members.sort(key=lambda m: (m["slug"] in dl_slugs, m["mention_count"], m["slug"]), reverse=True)
         canon = members[0]
         rest = members[1:]
 

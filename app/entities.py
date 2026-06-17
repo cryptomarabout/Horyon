@@ -31,6 +31,56 @@ BLOCKED_ALIASES = {
     "transaction", "gas", "fees", "upgrade", "mainnet", "testnet"
 }
 
+# Generic crypto vocabulary that must never become a word-boundary match on its
+# own (it would tag "Yield Basis" on any "yield" headline, "Layer" on any L2 post,
+# etc.). Superset of BLOCKED_ALIASES used by every runtime matcher (narratives +
+# entity_graph) via matchable_term(). Multi-word names are unaffected — only the
+# bare single term is rejected.
+GENERIC_TERMS = BLOCKED_ALIASES | {
+    "basis", "season", "points", "point", "vault", "vaults", "perp", "perps",
+    "perpetual", "perpetuals", "restaking", "staking", "airdrop", "rollup",
+    "rollups", "wallet", "oracle", "oracles", "validator", "validators", "node",
+    "nodes", "swap", "swaps", "dex", "cex", "lending", "borrow", "borrowing",
+    "treasury", "etf", "etfs", "rwa", "meme", "memecoin", "presale", "mint",
+    "minting", "vesting", "unlock", "unlocks", "fork", "mainnet", "incentive",
+    "incentives", "reward", "rewards", "fund", "labs", "ventures", "foundation",
+    "exchange", "wrapped", "native", "core", "main", "new", "open", "world",
+    # Common English words that are ALSO entity names — matching the bare word
+    # floods the graph ("Across" protocol matched "across" 254×, "Strategy",
+    # "Public"). The entity stays reachable via a distinctive alias/ticker if it
+    # has one; only the ambiguous bare token is rejected.
+    "across", "strategy", "public", "global", "digital", "general", "future",
+    "futures", "spot", "story", "signal", "standard", "group", "prime", "pure",
+    "simple", "instant", "secure", "trust", "official", "real", "fun", "free",
+    "idle", "movement", "bullish", "bearish", "push", "believe", "across",
+    "stable", "credit", "savings", "saving", "select", "fixed", "smart", "auto",
+}
+
+
+def matchable_term(term: str, type_: str | None = None, mention_count: int = 0) -> bool:
+    """Whether a name/alias may be used as a standalone word-boundary match.
+
+    Shared by every runtime matcher so false positives are killed in ONE place:
+    rejects @handles, pure digits, generic crypto vocabulary, and very short
+    ambiguous tokens — except short distinctive tickers (3-5 chars) for well-known
+    protocols/chains (Arc, Sui, SP1), which need ≥10 mentions to qualify.
+    """
+    t = (term or "").strip()
+    if not t or t.startswith("@") or t.isdigit():
+        return False
+    low = t.lower()
+    if low in GENERIC_TERMS:
+        return False
+    if len(t) >= 6:
+        return True
+    long_enough = len(t) >= 4
+    short_distinct = (
+        3 <= len(t) <= 5 and " " not in t
+        and type_ in ("protocol", "chain", "dao", "exchange", "fund")
+        and (mention_count or 0) >= 10
+    )
+    return long_enough or short_distinct
+
 
 
 def _plain(text: str, limit: int = 300) -> str:
@@ -106,7 +156,7 @@ def extract_and_upsert_entities(items: list[dict]) -> int:
             a.lower().strip() for a in (ent.get("aliases") or [])
             if isinstance(a, str) and len(a.strip()) >= 3
             and not a.strip().isdigit()
-            and a.lower().strip() not in BLOCKED_ALIASES
+            and a.lower().strip() not in GENERIC_TERMS
             and not _ERC_RE.match(a.lower().strip())
         ]
         # twitter_handle is stored separately; don't pollute aliases with @handles
@@ -128,9 +178,9 @@ def extract_and_upsert_entities(items: list[dict]) -> int:
         filtered_aliases = []
         for a in candidate_aliases:
             a_clean = a.lower().strip()
-            if (len(a_clean) >= 3 
-                and not a_clean.isdigit() 
-                and a_clean not in BLOCKED_ALIASES 
+            if (len(a_clean) >= 3
+                and not a_clean.isdigit()
+                and a_clean not in GENERIC_TERMS
                 and not _ERC_RE.match(a_clean)):
                 filtered_aliases.append(a_clean)
 

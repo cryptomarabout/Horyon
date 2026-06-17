@@ -299,25 +299,42 @@ Return ONLY valid JSON (no markdown, no prose outside the JSON):
 
 Rules:
 - label: a NARRATIVE (a moving story), not a single entity or a generic category. Title case.
+- This cluster is a theme that has developed over DAYS-to-WEEKS (the span is given below).
+  Frame the thesis as an ARC — what shifted across the window and where momentum points —
+  not a recap of the latest single headline.
 - thesis: name the mechanism and the entities. Avoid restating headlines.
 - watch_next: 1-3 items, each a specific thing (a vote outcome, a TVL/ratio level, a launch).
 - Do NOT invent facts not supported by the signals."""
 
 
 def build_narrative_synthesis_user(signals: list[dict], entities: list[str]) -> str:
+    # Order signals oldest→newest and date-stamp them so the model reads the arc.
+    dated = sorted(
+        (s for s in signals if s.get("ts")),
+        key=lambda s: s["ts"],
+    ) or list(signals)
     lines = []
-    for s in signals[:18]:
+    for s in dated[:18]:
         tag = (s.get("signal_type") or "news")[:4]
+        ts = s.get("ts")
+        day = ts.strftime("%b %d") if hasattr(ts, "strftime") else ""
         title = (s.get("title") or "").strip()
         body = (s.get("body") or "").strip()
-        row = f"[{tag}] {title}"
+        row = f"[{tag} {day}] {title}" if day else f"[{tag}] {title}"
         if body:
             row += f" — {body[:200]}"
         lines.append(row)
+    span = ""
+    ts_list = [s["ts"] for s in signals if s.get("ts")]
+    if ts_list:
+        lo, hi = min(ts_list), max(ts_list)
+        ndays = (hi.date() - lo.date()).days + 1
+        span = f"Span: {lo.strftime('%b %d')} → {hi.strftime('%b %d')} ({ndays} days)\n"
     ent = ", ".join(e for e in entities[:8] if e) or "(none resolved)"
     return (
-        f"Key entities: {ent}\n\n"
-        f"Signals in this cluster ({len(signals)} total, showing up to 18):\n"
+        f"Key entities: {ent}\n"
+        f"{span}\n"
+        f"Signals in this cluster ({len(signals)} total, oldest→newest, showing up to 18):\n"
         + "\n".join(lines)
     )
 

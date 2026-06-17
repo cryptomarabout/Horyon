@@ -215,6 +215,10 @@ export default function BulletFeed({
   const [searchState,  setSearchState]  = useState("idle");
   const [searchResult, setSearchResult] = useState("");
   const [searchSrcs,   setSearchSrcs]   = useState(0);
+  // Entity clicks: feed renders first (searchResult), the LLM/brief synthesis streams
+  // in above it (searchSynth). "none" for the free-text search bar.
+  const [searchSynth,      setSearchSynth]      = useState("");
+  const [searchSynthState, setSearchSynthState] = useState("none");
 
   // ── All entries (news + podcasts), pre-filter ──────────────────────────
   const allEntries = useMemo(() => {
@@ -292,19 +296,59 @@ export default function BulletFeed({
   }, [resetSelection]);
 
   // ── Search ─────────────────────────────────────────────────────────────
-  const handleSearch = useCallback(async (kw) => {
+  const handleSearch = useCallback(async (kw, opts = {}) => {
     setSearchQuery(kw);
     setSearchState("loading");
     setSearchResult("");
     setSearchSrcs(0);
+    setSearchSynth("");
+    setSearchSynthState("none");
     setSelected(null);
     setPanelOpen(true);
     document.dispatchEvent(new CustomEvent("horyon:search-loading"));
+
+    // ── Entity-tag click: feed first (instant), then synthesis on top ──────
+    if (opts.entity) {
+      try {
+        const r = await fetch("/api/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keyword: kw, entity: true, mode: "feed" }),
+        });
+        const data = await r.json();
+        setSearchResult(r.ok ? (data.content || "No recent items.") : (data.error || "Search failed."));
+        setSearchSrcs(data.sources ?? 0);
+        setSearchState(r.ok ? "done" : "error");
+      } catch {
+        setSearchResult("Could not reach search service.");
+        setSearchState("error");
+      }
+      document.dispatchEvent(new CustomEvent("horyon:search-done"));
+
+      // Phase 2 — synthesis (pre-computed brief, or one LLM call). Non-blocking.
+      setSearchSynthState("loading");
+      try {
+        const r2 = await fetch("/api/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keyword: kw, entity: true, mode: "synth" }),
+        });
+        const d2 = await r2.json();
+        const synth = (r2.ok && d2.content) ? d2.content : "";
+        setSearchSynth(synth);
+        setSearchSynthState(synth ? "done" : "none");
+      } catch {
+        setSearchSynthState("none");
+      }
+      return;
+    }
+
+    // ── Free-text search bar: full agent answer ───────────────────────────
     try {
       const r = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keyword: kw }),
+        body: JSON.stringify({ keyword: kw, entity: false }),
       });
       const data = await r.json();
       if (!r.ok) {
@@ -328,6 +372,8 @@ export default function BulletFeed({
     setSearchState("idle");
     setSearchResult("");
     setSearchSrcs(0);
+    setSearchSynth("");
+    setSearchSynthState("none");
     document.dispatchEvent(new CustomEvent("horyon:clear-input"));
     if (selected === null) setPanelOpen(false);
   }, [selected]);
@@ -411,7 +457,8 @@ export default function BulletFeed({
   const selectedPodcast   = isPodcastSel ? selectedEntry.podcast : null;
 
   const searchProp = searchQuery
-    ? { keyword: searchQuery, state: searchState, result: searchResult, sources: searchSrcs, onClose: handleClearSearch }
+    ? { keyword: searchQuery, state: searchState, result: searchResult, sources: searchSrcs,
+        synth: searchSynth, synthState: searchSynthState, onClose: handleClearSearch }
     : null;
 
   const totalSignals = counts.news + counts.tweets;
@@ -472,7 +519,7 @@ export default function BulletFeed({
                     selected={selected === i}
                     cursor={cursor === i && selected !== i}
                     onSelect={() => handleSelect(i)}
-                    onTagSearch={handleSearch}
+                    onTagSearch={(kw) => handleSearch(kw, { entity: true })}
                   />
                 )
               ))}

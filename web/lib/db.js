@@ -264,9 +264,18 @@ export async function searchProjectInfo(text) {
          AND lower(name) != ALL(ARRAY['idle','free','chain','token','tokens','network',
                                       'protocol','finance','open','world','fun',
                                       'across','capital','yield','basis','standard',
-                                      'bridge','native','wrapped','labs','group'])
+                                      'bridge','native','wrapped','labs','group',
+                                      'vault','vaults','credit','lending','stable',
+                                      'stablecoin','savings','staking','staked','liquid',
+                                      'restaking','perp','perps','core','pool','prime',
+                                      'real','spot','treasury','rewards','points','public',
+                                      'strategy','movement','bullish'])
          OR (
-           -- first word of multi-word name, length ≥ 4, not a generic word
+           -- first word of multi-word name, length ≥ 4, not a generic word.
+           -- The stop-list mirrors entities.GENERIC_TERMS so junk sub-products don't
+           -- piggyback on a generic prefix: "Yield Basis" must not tag every "yield"
+           -- headline, "Vault Bridge" every "vault", "Credit Coop" every "credit",
+           -- "Lending by AlphaFi" every "lending".
            name LIKE '% %'
            AND length(split_part(name, ' ', 1)) >= 4
            AND lower(split_part(name, ' ', 1)) != ALL(ARRAY['chain','free','idle','defi',
@@ -274,7 +283,14 @@ export async function searchProjectInfo(text) {
                                                              'blockchain','protocol','digital',
                                                              'crypto','capital','finance',
                                                              'decentralized','global','network',
-                                                             'native','wrapped','circle'])
+                                                             'native','wrapped','circle',
+                                                             'yield','vault','vaults','credit',
+                                                             'lending','stable','stablecoin',
+                                                             'savings','staking','staked','liquid',
+                                                             'restaking','perp','perps','basis',
+                                                             'core','pool','prime','real','spot',
+                                                             'treasury','rewards','points','public',
+                                                             'strategy','movement','bullish'])
            AND $1 ~* ('\\y' || replace(replace(split_part(name, ' ', 1), '.', '[.]'), '+', '[+]') || '\\y')
          )
        )
@@ -462,6 +478,174 @@ export async function getNarrativesWithSignals({ includeDormant = false } = {}) 
     return narrs.map(n => ({ ...n, signals: (bySlug[n.slug] || []).slice(0, 24) }));
   } catch {
     return narrs.map(n => ({ ...n, signals: [] }));
+  }
+}
+
+// ── Narrative entity graph ───────────────────────────────────────────────────
+// Nodes = entities that appear in narrative clusters; edges = two entities that
+// co-appear in the *same* narrative. The node set is intrinsically bounded by the
+// narrative layer (entity_slugs across ~10 narratives ⇒ ~40 nodes), so there is no
+// hairball risk even though entity_memory itself is large — we never read the full
+// entity table, only the slugs the narratives reference.
+//
+// Edge weight = number of shared narratives. We keep ALL co-appearance edges
+// (min weight 1): in the live data every pair shares exactly one narrative, so a
+// ≥2 threshold would render zero edges. The weight is still carried so that, as the
+// data grows, pairs that recur across clusters render as thicker links.
+//
+// Each node carries its representative momentum `state` = the hottest state among
+// the narratives it belongs to (heating ▸ forming ▸ steady ▸ cooling ▸ dormant),
+// so an entity glows with its most active story. Dormant narratives are included
+// here; the client hides them by default and can toggle them on (no refetch).
+//
+// Returns { nodes, edges } — plain JSON-serializable objects, safe to cross the
+// server→client boundary and to wrap in `unstable_cache`.
+export async function getNarrativeGraph({ includeDormant = true } = {}) {
+  const STATE_PRIO = { heating: 4, forming: 3, steady: 2, cooling: 1, dormant: 0 };
+  try {
+    const { rows: narrs } = await pool.query(
+      `SELECT slug, label, state, signal_count,
+              momentum_ratio::float8 AS momentum_ratio, delta_48h, entity_slugs
+       FROM narratives
+       ${includeDormant ? "" : "WHERE state <> 'dormant'"}
+       ORDER BY ${STATE_ORDER}, momentum_ratio DESC NULLS LAST`
+    );
+    const slugs = [...new Set(narrs.flatMap(n => n.entity_slugs || []))];
+    if (!slugs.length) return { nodes: [], edges: [] };
+
+    const { rows: ents } = await pool.query(
+      `SELECT e.slug, e.name, e.type, e.mention_count, e.twitter_handle, e.summary,
+              COALESCE(p.logo_url, e.logo_url) AS logo_url
+       FROM entity_memory e
+       LEFT JOIN defillama_protocols p ON p.slug = e.slug
+       WHERE e.slug = ANY($1)`,
+      [slugs]
+    );
+    const bySlug = Object.fromEntries(ents.map(e => [e.slug, e]));
+
+    // Build nodes — only entities that actually exist in entity_memory become nodes.
+    const nodeMap = new Map();
+    for (const n of narrs) {
+      for (const s of n.entity_slugs || []) {
+        const e = bySlug[s];
+        if (!e) continue;
+        let node = nodeMap.get(s);
+        if (!node) {
+          node = {
+            slug: s,
+            name: e.name,
+            type: e.type,
+            mentionCount: e.mention_count ?? 0,
+            twitterHandle: e.twitter_handle || null,
+            summary: e.summary || null,
+            logoUrl: e.logo_url || null,
+            state: n.state,
+            narratives: [],
+          };
+          nodeMap.set(s, node);
+        }
+        if ((STATE_PRIO[n.state] ?? -1) > (STATE_PRIO[node.state] ?? -1)) node.state = n.state;
+        node.narratives.push({
+          slug: n.slug,
+          label: n.label,
+          state: n.state,
+          signalCount: n.signal_count,
+          momentumRatio: n.momentum_ratio,
+          delta: n.delta_48h,
+        });
+      }
+    }
+
+    // Build edges — co-appearance within a narrative, deduped + weighted.
+    const edgeMap = new Map();
+    for (const n of narrs) {
+      const present = (n.entity_slugs || []).filter(s => nodeMap.has(s));
+      for (let i = 0; i < present.length; i++) {
+        for (let j = i + 1; j < present.length; j++) {
+          const [a, b] = present[i] < present[j]
+            ? [present[i], present[j]]
+            : [present[j], present[i]];
+          const key = `${a}|${b}`;
+          let edge = edgeMap.get(key);
+          if (!edge) { edge = { source: a, target: b, weight: 0, narratives: [] }; edgeMap.set(key, edge); }
+          edge.weight += 1;
+          edge.narratives.push({ slug: n.slug, label: n.label, state: n.state });
+        }
+      }
+    }
+
+    return { nodes: [...nodeMap.values()], edges: [...edgeMap.values()] };
+  } catch {
+    return { nodes: [], edges: [] };
+  }
+}
+
+// ── Entity co-occurrence graph (the "all entities" map) ──────────────────────
+// Reads the precomputed entity_edges (built by app/entity_graph.py). Returns the
+// top `maxNodes` entities by mention_count that have at least one edge (weight ≥
+// minWeight), enriched with type / TVL / logo / momentum state, plus every edge
+// among them. The client filters by edge weight + type + search with no refetch.
+export async function getEntityGraph({ maxNodes = 240, minWeight = 2 } = {}) {
+  try {
+    const { rows: nodeRows } = await pool.query(
+      `WITH ew AS (
+         SELECT slug_a, slug_b, weight FROM entity_edges WHERE weight >= $1
+       ),
+       deg AS (
+         SELECT slug, sum(weight)::int AS strength, count(*)::int AS degree
+         FROM (SELECT slug_a AS slug, weight FROM ew
+               UNION ALL SELECT slug_b, weight FROM ew) u
+         GROUP BY slug
+       )
+       SELECT e.slug, e.name, e.type, e.mention_count, e.summary, e.twitter_handle,
+              COALESCE(p.logo_url, e.logo_url) AS logo_url,
+              p.tvl_usd::float8 AS tvl_usd, p.category,
+              d.strength, d.degree, n.state AS narrative_state
+       FROM deg d
+       JOIN entity_memory e ON e.slug = d.slug
+       LEFT JOIN defillama_protocols p ON p.slug = e.slug
+       LEFT JOIN LATERAL (
+         SELECT state FROM narratives
+         WHERE d.slug = ANY(entity_slugs)
+         ORDER BY array_position(
+           ARRAY['heating','forming','steady','cooling','dormant']::text[], state)
+         LIMIT 1
+       ) n ON true
+       ORDER BY e.mention_count DESC NULLS LAST
+       LIMIT $2`,
+      [minWeight, maxNodes]
+    );
+    if (!nodeRows.length) return { nodes: [], edges: [] };
+
+    const slugs = nodeRows.map((r) => r.slug);
+    const { rows: edgeRows } = await pool.query(
+      `SELECT slug_a, slug_b, weight, npmi, examples FROM entity_edges
+        WHERE weight >= $1 AND slug_a = ANY($2) AND slug_b = ANY($2)`,
+      [minWeight, slugs]
+    );
+
+    const nodes = nodeRows.map((r) => ({
+      slug: r.slug,
+      name: r.name,
+      type: r.type || "other",
+      mentionCount: r.mention_count ?? 0,
+      summary: r.summary || null,
+      twitterHandle: r.twitter_handle || null,
+      logoUrl: r.logo_url || null,
+      tvl: r.tvl_usd ?? null,
+      category: r.category || null,
+      degree: r.degree ?? 0,
+      strength: r.strength ?? 0,
+      narrativeState: r.narrative_state || null,
+    }));
+    const edges = edgeRows.map((e) => ({
+      source: e.slug_a, target: e.slug_b, weight: e.weight,
+      npmi: e.npmi == null ? 0 : Number(e.npmi),
+      examples: Array.isArray(e.examples) ? e.examples.slice(0, 3) : [],
+    }));
+    return { nodes, edges };
+  } catch {
+    return { nodes: [], edges: [] };
   }
 }
 
