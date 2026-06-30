@@ -1,16 +1,12 @@
 import { NextResponse } from "next/server";
-import { chatComplete } from "../../../lib/llm";
+import { pool } from "../../../lib/db";
 
-// Mirrors app/prompts.py BULLET_ANALYST_SYSTEM. This fallback runs only on a cache miss
-// and receives no DB context, so it must lean on the headline/summary and refuse to invent.
-const SYSTEM = `You are a concise, factual crypto markets analyst. \
-Given a news headline and summary, write 3–4 sentences of additional context: \
-background on the project or event, why it matters to the market, and one concrete thing to watch. \
-CRITICAL: Do NOT invent numbers, prices, TVL figures, dates, version strings, launch events, or history. \
-You are given no verified database context here, so base the analysis strictly on what the headline and \
-summary state plus widely-established background you are certain of — when unsure, stay qualitative rather \
-than stating a specific figure. Be direct. No bullet points. No headers.`;
-
+// PUBLIC SITE — NO LIVE LLM.
+// Per-bullet analyst context is precomputed into digest_bullet_analysis post-digest and
+// served to the panel via the `cachedAnalysis` prop. This route is the fallback for the
+// cases where the prop is absent (e.g. a bullet surfaced outside its digest-day page).
+// It now looks the analysis up by title instead of calling the paid LLM chain; on a
+// genuine miss it returns empty so the panel shows a graceful "no additional details".
 export async function POST(req) {
   let title, body;
   try {
@@ -23,18 +19,19 @@ export async function POST(req) {
     return NextResponse.json({ error: "title is required" }, { status: 400 });
   }
 
-  const userMsg = body?.trim()
-    ? `Headline: ${title}\n\nSummary: ${body}`
-    : `Headline: ${title}`;
-
   try {
-    const { content } = await chatComplete({ system: SYSTEM, user: userMsg, max_tokens: 350, temperature: 0.5 });
-    return NextResponse.json({ content });
+    const { rows } = await pool.query(
+      `SELECT analysis
+         FROM digest_bullet_analysis
+        WHERE lower(title) = lower($1)
+          AND analysis IS NOT NULL AND analysis <> ''
+        ORDER BY digest_date DESC
+        LIMIT 1`,
+      [title.trim()]
+    );
+    return NextResponse.json({ content: rows[0]?.analysis || "" });
   } catch (err) {
     console.error("details route error:", err?.message ?? err);
-    return NextResponse.json(
-      { error: "AI request failed" },
-      { status: 502 }
-    );
+    return NextResponse.json({ content: "" });
   }
 }

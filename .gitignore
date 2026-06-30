@@ -8,6 +8,11 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 
+# Test coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
+
 # Node / Next.js
 node_modules/
 web/.next/
@@ -29,3 +34,6 @@ cookies.txt
 backups/
 *.dump
 *.sql.gz
+
+# Claude Code machine-local settings (may contain ad-hoc creds in allow-rules)
+.claude/settings.local.json

@@ -43,6 +43,40 @@ async def _ingest_job() -> None:
         log.warning("ingest: bullet analysis safety-net check failed (non-fatal)", exc_info=True)
 
 
+async def _send_audio_briefing(app: Application) -> None:
+    """Send today's audio briefing to each allowed chat, if one was rendered. Best-effort: a
+    missing/blocked/failed render or a Telegram error is logged and swallowed — never fatal."""
+    from io import BytesIO
+    from . import config as _cfg, db as _db
+
+    try:
+        today = datetime.now(timezone.utc).date()
+        meta = await asyncio.to_thread(lambda: _db.get_audio_briefing(today))
+        if not meta or meta.get("status") != "ready" or not meta.get("has_audio"):
+            return
+        audio = await asyncio.to_thread(lambda: _db.get_audio_bytes(today))
+        if not audio:
+            return
+        ext = "wav" if meta.get("mime") == "audio/wav" else "mp3"
+        caption = (f"🎧 Your {today.strftime('%A')} Horyon briefing · "
+                   f"full feed → {_cfg.PUBLIC_BASE_URL}")
+        for chat_id in _cfg.ALLOWED_CHAT_IDS:
+            try:
+                await app.bot.send_audio(
+                    chat_id,
+                    audio=BytesIO(audio),
+                    title=f"Horyon Daily Briefing · {today.strftime('%b %d')}",
+                    performer="Horyon",
+                    duration=meta.get("duration_sec") or None,
+                    filename=f"horyon-briefing-{today}.{ext}",
+                    caption=caption,
+                )
+            except TelegramError:
+                log.exception("failed to send audio briefing to chat_id=%s", chat_id)
+    except Exception:
+        log.warning("audio briefing send skipped (non-fatal)", exc_info=True)
+
+
 async def _post_init(app: Application) -> None:
     global _scheduler
 
@@ -65,6 +99,11 @@ async def _post_init(app: Application) -> None:
                     )
             except TelegramError:
                 log.exception("failed to send daily digest to chat_id=%s", chat_id)
+
+        # Daily audio briefing — generated best-effort in the post-digest orchestration above, so
+        # it's already in the DB by now. Sent as a SEPARATE message right after the text so a
+        # missing/blocked/failed render can never affect the digest itself.
+        await _send_audio_briefing(app)
 
         # Refresh the weekly digest for the current (in-progress) week in the background so
         # the web /weekly preview includes today's data. Skip until the week has ≥2 daily
@@ -184,6 +223,29 @@ async def _post_init(app: Application) -> None:
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=180),
     )
 
+    async def _kaiko_cron() -> None:
+        """Ingest Kaiko Research (kaiko.com) editorial via its sitemaps — no RSS/API exists.
+        Only NEW article URLs are fetched (already-stored URLs are skipped), and each run is
+        capped, so steady state is a few small sitemap GETs. Items land in feed_items as
+        news, feeding the digest + narratives like any other source."""
+        from . import kaiko
+        try:
+            stats = await asyncio.to_thread(kaiko.run)
+            log.info("kaiko cron: %s", stats)
+        except Exception:
+            log.exception("kaiko cron failed")
+
+    if config.KAIKO_ENABLED:
+        _scheduler.add_job(
+            _kaiko_cron,
+            "interval",
+            minutes=config.KAIKO_INTERVAL_MIN,
+            id="kaiko_ingest",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=240),
+        )
+
     async def _narratives_cron() -> None:
         """Rebuild the narrative layer between digests so momentum states stay fresh
         (podcast/governance signals arrive off the daily cadence, and decay is time-based)."""
@@ -222,6 +284,27 @@ async def _post_init(app: Application) -> None:
         max_instances=1,
         coalesce=True,
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=480),
+    )
+
+    async def _avatars_cron() -> None:
+        """Mirror map-entity avatars into Postgres so the public map serves them from our
+        own DB (no per-node unavatar.io stampede, no web egress). Reads entity_edges, so it
+        runs after the graph rebuild. Best-effort; failures fall back to the live URL client-side."""
+        from . import avatars
+        try:
+            stats = await asyncio.to_thread(avatars.refresh_avatars)
+            log.info("avatars cron: %s", stats)
+        except Exception:
+            log.exception("avatars cron failed")
+
+    _scheduler.add_job(
+        _avatars_cron,
+        "interval",
+        hours=24,
+        id="avatar_mirror",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=720),
     )
 
     async def _weekly_tg_cron() -> None:
@@ -298,14 +381,14 @@ async def _post_shutdown(app: Application) -> None:
 
 
 def _check_env() -> None:
-    missing = [
-        name for name, val in {
-            "TELEGRAM_BOT_TOKEN": config.TELEGRAM_BOT_TOKEN,
-            "OPENROUTER_API_KEY": config.OPENROUTER_API_KEY,
-            "TELEGRAM_WEBHOOK_BASE": config.TELEGRAM_WEBHOOK_BASE,
-            "TELEGRAM_WEBHOOK_SECRET": config.TELEGRAM_WEBHOOK_SECRET,
-        }.items() if not val
-    ]
+    required: dict[str, str] = {
+        "TELEGRAM_BOT_TOKEN": config.TELEGRAM_BOT_TOKEN,
+        "OPENROUTER_API_KEY": config.OPENROUTER_API_KEY,
+    }
+    if not config.BOT_USE_POLLING:
+        required["TELEGRAM_WEBHOOK_BASE"] = config.TELEGRAM_WEBHOOK_BASE
+        required["TELEGRAM_WEBHOOK_SECRET"] = config.TELEGRAM_WEBHOOK_SECRET
+    missing = [name for name, val in required.items() if not val]
     if missing:
         raise SystemExit(f"Missing required env vars: {', '.join(missing)}")
 
@@ -317,6 +400,16 @@ def main() -> None:
     )
     # httpx logs full request URLs at INFO, which include the bot token — silence it.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    if config.BOT_DISABLED:
+        import time
+        log.warning(
+            "DISABLE_BOT=true — Telegram, crons, and ingest are ALL suppressed. "
+            "Container is alive but idle (test/web-only mode against prod DB)."
+        )
+        while True:
+            time.sleep(3600)
+
     _check_env()
 
     app = (
@@ -328,16 +421,20 @@ def main() -> None:
     )
     handlers.register(app)
 
-    log.info("starting webhook at %s (listen %s:%d)",
-             config.TELEGRAM_WEBHOOK_URL, config.WEBHOOK_LISTEN_HOST, config.WEBHOOK_PORT)
-    app.run_webhook(
-        listen=config.WEBHOOK_LISTEN_HOST,
-        port=config.WEBHOOK_PORT,
-        url_path=config.TELEGRAM_WEBHOOK_PATH.lstrip("/"),
-        webhook_url=config.TELEGRAM_WEBHOOK_URL,
-        secret_token=config.TELEGRAM_WEBHOOK_SECRET,
-        drop_pending_updates=True,
-    )
+    if config.BOT_USE_POLLING:
+        log.info("starting in POLLING mode (dev/test — not for production)")
+        app.run_polling(drop_pending_updates=True)
+    else:
+        log.info("starting webhook at %s (listen %s:%d)",
+                 config.TELEGRAM_WEBHOOK_URL, config.WEBHOOK_LISTEN_HOST, config.WEBHOOK_PORT)
+        app.run_webhook(
+            listen=config.WEBHOOK_LISTEN_HOST,
+            port=config.WEBHOOK_PORT,
+            url_path=config.TELEGRAM_WEBHOOK_PATH.lstrip("/"),
+            webhook_url=config.TELEGRAM_WEBHOOK_URL,
+            secret_token=config.TELEGRAM_WEBHOOK_SECRET,
+            drop_pending_updates=True,
+        )
 
 
 if __name__ == "__main__":

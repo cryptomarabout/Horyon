@@ -1,0 +1,6 @@
+# Horyon — marketing landing (apex). The product lives at https://app.horyon.xyz
+# (its own robots.txt + dynamic sitemap covers the digest pages).
+User-agent: *
+Allow: /
+
+Sitemap: https://horyon.xyz/sitemap.xml

@@ -1,0 +1,98 @@
+# External-DB overlay — point a test machine at the prod (or any remote) Postgres.
+#
+# ══ WRITE SAFETY ═════════════════════════════════════════════════════════════════
+# ALL three services connect as `horyon_readonly` — a Postgres role that has ONLY
+# SELECT on every table. Any INSERT / UPDATE / DELETE fails at the DB level with a
+# permission error, regardless of what application code attempts. This is enforced
+# by Postgres, not by the app layer.
+#
+# DISABLE_BOT=true is a second layer: it suppresses Telegram, all APScheduler
+# crons, and ingest before the app even touches the DB. Belt + suspenders.
+#
+# Provision the role on prod once (already done if READONLY_DB_PASSWORD is in .env):
+#   READONLY_PW=$(grep READONLY_DB_PASSWORD .env | cut -d= -f2-)
+#   docker exec -i horyon-db psql -U crypto -d crypto \
+#     -v "readonly_pw=$READONLY_PW" -f - < deploy/readonly_db_role.sql
+#
+# ══ HOW IT WORKS ════════════════════════════════════════════════════════════════
+# The base compose hardcodes DATABASE_URL to the internal `db:5432` hostname.
+# This overlay rewrites those URLs to reach the remote DB through an SSH tunnel
+# you open on the HOST before launching the stack.
+#
+# The local `db` container still starts (so `depends_on: db` passes) but no
+# service ever connects to it — all traffic goes to the tunnel endpoint.
+#
+# ══ SETUP ON THE TEST MACHINE ═══════════════════════════════════════════════════
+#
+# 1. Open an SSH tunnel to the prod host (keep it open in a terminal):
+#
+#      ssh -L 0.0.0.0:15433:127.0.0.1:5433 user@prod-ip -N
+#
+#    Port 15433 avoids the conflict with the local `db` container which binds
+#    127.0.0.1:5433 on the host.
+#
+#    NOTE: bind the LOCAL end to 0.0.0.0 (not the default loopback). On Linux the
+#    containers reach this via host.docker.internal = the Docker bridge-gateway IP,
+#    which can't reach a 127.0.0.1-only tunnel. Then lock the port to the bridge:
+#      sudo ufw allow from 172.16.0.0/12 to any port 15433 proto tcp
+#    (ufw default-deny already blocks the public side.) See docs/test-machine-setup.md.
+#
+# 2. touch cookies.txt   # bot volume-mount requires this file to exist
+#
+# 3. Create .env — only two values needed:
+#
+#      POSTGRES_PASSWORD=<any string>             # inits the local throwaway db container (unused)
+#      READONLY_DB_PASSWORD=<value from prod .env>  # for all prod DB connections
+#
+#    Do NOT put the real prod master password here — in this mode POSTGRES_PASSWORD only
+#    initialises the empty local `db` container; nothing connects to prod as the owner.
+#
+# 4. Build + launch:
+#
+#      docker compose -f docker-compose.yml \
+#                     -f docker-compose.dev.yml \
+#                     -f docker-compose.external-db.yml \
+#                     up -d db bot monitor web
+#
+#    Web → http://localhost:3000  (prod data, read-only enforced at DB level)
+#    Monitor → http://localhost:8090
+#    Bot → idle (DISABLE_BOT=true), cannot write even if un-disabled
+#
+# Full instructions: docs/test-machine-setup.md
+#
+# ══ DANGER: MANUAL EXEC INTO THE BOT CONTAINER ═══════════════════════════════
+# Even with DISABLE_BOT, `docker exec horyon-bot python3 -m app.digest` will run
+# against prod. It will FAIL on any INSERT/UPDATE/DELETE (permission denied), but
+# it will try. Use --no-persist / --dry-run flags if you need to test locally.
+#
+# ════════════════════════════════════════════════════════════════════════════════
+
+services:
+  bot:
+    environment:
+      # Suppress ALL Telegram + cron activity. Container stays alive but idle.
+      - DISABLE_BOT=true
+      # Read-only connection to prod DB via SSH tunnel (host port 15433 → prod 5433).
+      # horyon_readonly has SELECT only — Postgres rejects any write at the role level.
+      - DATABASE_URL=postgresql://horyon_readonly:${READONLY_DB_PASSWORD}@host.docker.internal:15433/crypto
+      # Stubs — never reached due to DISABLE_BOT early-exit.
+      - BOT_USE_POLLING=true
+      - TELEGRAM_WEBHOOK_BASE=http://localhost:8080
+      - TELEGRAM_WEBHOOK_SECRET=dev
+    # Default healthcheck probes port 8080 (webhook listener). Nothing listens
+    # there with DISABLE_BOT=true — override to always pass.
+    healthcheck:
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 60s
+      timeout: 5s
+      retries: 1
+
+  monitor:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - DATABASE_URL=postgresql://horyon_readonly:${READONLY_DB_PASSWORD}@host.docker.internal:15433/crypto
+
+  web:
+    environment:
+      - DATABASE_URL=postgresql://horyon_readonly:${READONLY_DB_PASSWORD}@host.docker.internal:15433/crypto

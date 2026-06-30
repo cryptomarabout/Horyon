@@ -77,6 +77,35 @@ def _build_matcher() -> tuple[re.Pattern | None, dict[str, str]]:
     return pat, term_to_slug
 
 
+def _count_digest_mentions(pat: re.Pattern, term_to_slug: dict[str, str]) -> dict[str, int]:
+    """"Horyon coverage": how many DISTINCT daily-brief bullets cite each entity.
+
+    Scans the curated digest bullets (NOT raw feed items) with the SAME matcher as the
+    co-occurrence graph, so it inherits the generic-term blocklist + alias merge — no
+    false hits from generic vocabulary. This is the contrast metric to the raw source
+    `mention_count`: 'how often Horyon itself wrote about this entity'. All-time,
+    best-effort — a failure here must never break the graph rebuild.
+    """
+    try:
+        bullets = db.get_all_digest_bullets()
+    except Exception:
+        log.warning("entity_graph: digest-bullet fetch failed", exc_info=True)
+        return {}
+    counts: dict[str, int] = defaultdict(int)
+    for b in bullets:
+        text = _plain(((b.get("title") or "") + " " + (b.get("body") or "")))[:MAX_ITEM_CHARS]
+        if not text:
+            continue
+        slugs = {
+            term_to_slug[m.lower()]
+            for m in pat.findall(text)
+            if m.lower() in term_to_slug
+        }
+        for s in slugs:
+            counts[s] += 1
+    return dict(counts)
+
+
 def build_and_store(days: int = WINDOW_DAYS, persist: bool = True,
                     min_weight: int = MIN_EDGE_WEIGHT) -> dict:
     """Scan the last `days` of feed items, count entity co-occurrence, store edges."""
@@ -162,15 +191,24 @@ def build_and_store(days: int = WINDOW_DAYS, persist: bool = True,
         node_slugs.add(e["slug_a"])
         node_slugs.add(e["slug_b"])
 
+    # Horyon coverage: distinct daily-brief bullets per entity (reuses the same matcher).
+    digest_counts = _count_digest_mentions(pat, term_to_slug)
+
     if persist:
         try:
             db.replace_entity_edges(edges)
         except Exception:
             log.warning("entity_graph: persist failed", exc_info=True)
+        try:
+            db.update_digest_mention_counts(digest_counts)
+        except Exception:
+            log.warning("entity_graph: digest-coverage persist failed", exc_info=True)
 
-    log.info("entity_graph: %d items scanned → %d nodes, %d edges (min_weight=%d)",
-             len(items), len(node_slugs), len(edges), min_weight)
-    return {"items": len(items), "nodes": len(node_slugs), "edges": len(edges)}
+    log.info("entity_graph: %d items scanned → %d nodes, %d edges (min_weight=%d), "
+             "%d entities with brief coverage",
+             len(items), len(node_slugs), len(edges), min_weight, len(digest_counts))
+    return {"items": len(items), "nodes": len(node_slugs), "edges": len(edges),
+            "digest_covered": len(digest_counts)}
 
 
 def main() -> None:
@@ -182,7 +220,8 @@ def main() -> None:
     args = ap.parse_args()
 
     res = build_and_store(days=args.days, persist=not args.no_persist, min_weight=args.min_weight)
-    print(f"items={res['items']}  nodes={res['nodes']}  edges={res['edges']}")
+    print(f"items={res['items']}  nodes={res['nodes']}  edges={res['edges']}  "
+          f"digest_covered={res['digest_covered']}")
 
 
 if __name__ == "__main__":

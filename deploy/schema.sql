@@ -2,6 +2,10 @@
 -- docker exec -i horyon-db psql -U crypto -d crypto < deploy/schema.sql
 
 CREATE EXTENSION IF NOT EXISTS vector;
+-- Trigram index support for the public site's word-boundary regex matches on feed content
+-- (entity-tag clicks + bullet source corroboration use `content ~* '\y…\y'`, which can't use
+-- the FTS GIN index and would otherwise sequential-scan feed_items on every request).
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE TABLE IF NOT EXISTS feed_items (
     id           serial PRIMARY KEY,
@@ -18,6 +22,25 @@ CREATE TABLE IF NOT EXISTS feed_items (
     mentions     text[] NOT NULL DEFAULT '{}'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS feed_items_content_hash_key ON feed_items (content_hash);
+
+-- Full-text search column for the PUBLIC free-text search bar. HTML is stripped first
+-- (regexp_replace is IMMUTABLE, so it is allowed in a generated column) so tags don't
+-- pollute the lexeme set. This replaces per-query Ollama embedding on the free-text
+-- path: pure in-DB FTS scales to high QPS with no external call (see web/api/search).
+ALTER TABLE feed_items ADD COLUMN IF NOT EXISTS content_tsv tsvector
+    GENERATED ALWAYS AS (
+        to_tsvector('english', regexp_replace(coalesce(content, ''), '<[^>]+>', ' ', 'g'))
+    ) STORED;
+CREATE INDEX IF NOT EXISTS feed_items_content_tsv_idx ON feed_items USING GIN (content_tsv);
+
+-- Accelerates the public site's `content ~* '\y<term>\y'` regex queries (entity feed +
+-- bullet source corroboration) — pg_trgm GIN serves case-insensitive regex/ILIKE matches.
+CREATE INDEX IF NOT EXISTS feed_items_content_trgm_idx ON feed_items USING GIN (content gin_trgm_ops);
+-- Supports the `COALESCE(pub_date, ingested_at) >= now() - INTERVAL '30 days'` window prune
+-- those same queries apply (and the FTS recency ordering), so the date filter uses an index
+-- instead of scanning every row.
+CREATE INDEX IF NOT EXISTS feed_items_effective_date_idx
+    ON feed_items (COALESCE(pub_date, ingested_at) DESC);
 
 -- ivfflat index: create AFTER initial data load so centroids reflect real data
 -- CREATE INDEX feed_items_embedding_idx ON feed_items USING ivfflat (embedding vector_cosine_ops) WITH (lists=100);
@@ -120,6 +143,7 @@ CREATE TABLE IF NOT EXISTS entity_memory (
     summary        text,
     last_mentioned date,
     mention_count  int         NOT NULL DEFAULT 1,
+    digest_mention_count int   NOT NULL DEFAULT 0,  -- "Horyon coverage": distinct daily-brief bullets citing this entity (app/entity_graph.py)
     updated_at     timestamptz NOT NULL DEFAULT now(),
     twitter_handle text,
     logo_url       text
@@ -139,6 +163,7 @@ CREATE TABLE IF NOT EXISTS weekly_digest (
     trigger     text        NOT NULL DEFAULT 'cron',
     duration_ms int,
     error       text,
+    market_snapshot jsonb,   -- structured market levels for the Weekly Market Snapshot block
     created_at  timestamptz NOT NULL DEFAULT now(),
     UNIQUE (week_start)
 );
@@ -159,6 +184,95 @@ CREATE TABLE IF NOT EXISTS digest_bullet_analysis (
     UNIQUE (digest_date, title)
 );
 CREATE INDEX IF NOT EXISTS digest_bullet_analysis_date_idx ON digest_bullet_analysis (digest_date DESC);
+
+-- Twitter/X thread rendering of a daily digest (one row per digest date).
+-- Built post-digest by app/threads.py from digest_bullet_analysis (already grounded +
+-- importance-scored). The hook tweet carries the /api/og card; one tweet per bullet,
+-- ordered by importance to match the card. `status` is the contract with the external poster.
+CREATE TABLE IF NOT EXISTS digest_threads (
+    digest_date  date        PRIMARY KEY,
+    hook         text        NOT NULL,                    -- tweet 1 (OG image attaches here)
+    tweets       jsonb       NOT NULL,                    -- [{title, text, link, importance_score}] in post order
+    cta          text        NOT NULL DEFAULT '',         -- optional closing tweet
+    og_image_url text        NOT NULL DEFAULT '',         -- /api/og card to attach to the hook
+    model_used   text        NOT NULL DEFAULT '',
+    status       text        NOT NULL DEFAULT 'pending',  -- 'pending' | 'posted' | 'blocked' (fail-closed safety gate; web requires explicit unblock before posting)
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+
+-- Daily audio briefing: a spoken digest rendered in THREE length variants per date
+-- ('short' ~90-sec flash, 'standard' ~6-min two-voice podcast, 'explainer' ~12-min deep dive).
+-- Built post-digest by app/briefing.py — an LLM rewrites the day's top bullet analyses
+-- (grounded, no new facts) into a spoken script, which a free TTS engine (app/tts.py)
+-- renders to audio stored inline as bytea (~2 MB/day/variant). Served on the web via a Range-aware
+-- /api/audio/[date]?variant= route and sent to Telegram alongside the digest. `status` carries the
+-- lifecycle so a blocked/failed render is never delivered. PK is (digest_date, variant).
+CREATE TABLE IF NOT EXISTS digest_audio (
+    digest_date  date        NOT NULL,
+    variant      text        NOT NULL DEFAULT 'standard',  -- 'short' | 'standard' | 'explainer' (see app/briefing.py)
+    script       text        NOT NULL,                    -- the spoken script (re-synth, captions, debug)
+    audio        bytea,                                   -- rendered audio bytes (NULL until synth succeeds)
+    mime         text        NOT NULL DEFAULT 'audio/mpeg',
+    voice        text        NOT NULL DEFAULT '',          -- e.g. 'en-US-AriaNeural'
+    tts_engine   text        NOT NULL DEFAULT '',          -- 'edge' | 'piper'
+    duration_sec smallint,                                -- for the Telegram player + UI label
+    byte_size    int,
+    word_count   smallint,
+    model_used   text        NOT NULL DEFAULT '',          -- the script LLM
+    status       text        NOT NULL DEFAULT 'pending',   -- pending | ready | blocked | failed
+    chapters     jsonb,                                    -- [{title, start}] segment markers for in-player nav
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (digest_date, variant)
+);
+-- Additive for DBs created before chapters existed (idempotent).
+ALTER TABLE digest_audio ADD COLUMN IF NOT EXISTS chapters jsonb;
+-- Additive: pseudo-waveform array (100 floats 0-1) for the web player bar visualisation.
+ALTER TABLE digest_audio ADD COLUMN IF NOT EXISTS waveform jsonb;
+-- Additive: three length variants per date. Older DBs had digest_date as the sole PK; add the
+-- column (existing rows default to 'standard') and repoint the PK to (digest_date, variant).
+-- Idempotent — the DO block is a no-op once 'variant' is part of the primary key.
+ALTER TABLE digest_audio ADD COLUMN IF NOT EXISTS variant text NOT NULL DEFAULT 'standard';
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index i
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
+        WHERE i.indrelid = 'digest_audio'::regclass AND i.indisprimary AND a.attname = 'variant'
+    ) THEN
+        ALTER TABLE digest_audio DROP CONSTRAINT IF EXISTS digest_audio_pkey;
+        ALTER TABLE digest_audio ADD PRIMARY KEY (digest_date, variant);
+    END IF;
+END $$;
+
+-- Pre-rendered /api/og social card per digest date. The bot renders it once post-digest
+-- (via the web route over the internal docker network) and stores the PNG here; the public
+-- /api/og route then serves these bytes instead of rendering on every request — removing a
+-- per-request compute-DoS vector on the public site. See app/og_cache.py.
+CREATE TABLE IF NOT EXISTS digest_og (
+    digest_date  date        PRIMARY KEY,
+    png          bytea       NOT NULL,                   -- rendered 1200x628 card
+    mime         text        NOT NULL DEFAULT 'image/png',
+    byte_size    int,
+    source_at    timestamptz,                            -- the digest created_at this card was rendered from
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+
+-- Mirrored entity avatars for the Entity Map. The map used to resolve every node's
+-- avatar in the BROWSER (logo_url, else twitter_handle → unavatar.io) in one burst on
+-- load, which unavatar rate-limited → many nodes silently fell back to a monogram. The
+-- bot now fetches each map entity's avatar once (server-side — the only place allowed to
+-- make external calls), stores the bytes here, and the public /api/avatar/[slug] route
+-- serves them from our own DB. No per-request external call, no client stampede. The
+-- original logo_url/unavatar URLs remain a client-side fallback. See app/avatars.py.
+CREATE TABLE IF NOT EXISTS entity_avatars (
+    slug         text        PRIMARY KEY REFERENCES entity_memory(slug) ON DELETE CASCADE,
+    image        bytea       NOT NULL,                   -- the avatar bytes (jpeg/png/webp)
+    mime         text        NOT NULL DEFAULT 'image/png',
+    source_url   text        NOT NULL,                   -- the URL the bytes were fetched from
+    etag         text,                                   -- upstream ETag, when present (debug)
+    byte_size    int,
+    fetched_at   timestamptz NOT NULL DEFAULT now()
+);
 
 -- Snapshot DAO governance proposals (active + recently closed).
 CREATE TABLE IF NOT EXISTS governance_proposals (
@@ -247,10 +361,14 @@ CREATE TABLE IF NOT EXISTS narratives (
     first_seen     date,
     last_signal_at timestamptz,
     model_used     text        NOT NULL DEFAULT '',
+    sector         text,                                    -- primary research sector (deterministic classify, app/narratives.py:_sector)
+    source_count   int,                                     -- distinct source domains across member signals (honest breadth)
+    key_points     text[]      NOT NULL DEFAULT '{}',        -- 2-3 executive takeaways for the research brief abstract
     updated_at     timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS narratives_state_idx     ON narratives (state);
 CREATE INDEX IF NOT EXISTS narratives_momentum_idx  ON narratives (momentum_ratio DESC);
+CREATE INDEX IF NOT EXISTS narratives_sector_idx    ON narratives (sector);
 
 -- Join: which signals belong to a narrative. Denormalized (title/url/importance/ts) so the
 -- web evidence timeline renders without joining back to three source tables.

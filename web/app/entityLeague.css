@@ -1,0 +1,256 @@
+/* =============================================================================
+   Atlas › Index — the ranked entity screener table (`pl-*`) + its methodology
+   info popover. Split out of maps.css (2026-06-26). Imported globally in
+   app/layout.js. The Board/Network graph styling lives in entityGraph.css; the
+   shared map chrome (toolbar/canvas/zoom) stays in maps.css.
+   ============================================================================= */
+
+/* ── Protocol League — the Atlas "Protocols" screener ─────────────────────── */
+/* A ranked, sortable table: DeFiLlama fundamentals × Horyon coverage. Drops the
+   starfield canvas background for a clean institutional data surface. */
+.map-canvas--table {
+  background: var(--surface);
+  background-image: none;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.pl-wrap { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+
+/* Sector filter strip */
+.pl-scroll { overflow: auto; min-height: 0; flex: 1; }
+
+.pl-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.pl-table thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-3);
+  text-align: right; padding: 0; font-weight: 500;
+  white-space: nowrap;
+}
+.pl-table thead th.pl-rank-h, .pl-table thead th.pl-name-h {
+  text-align: left;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-4); padding: 9px 10px;
+}
+.pl-th {
+  width: 100%; display: inline-flex; align-items: center; gap: 3px; justify-content: flex-end;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-4); background: transparent; border: none; cursor: pointer;
+  padding: 9px 12px; transition: color var(--t);
+}
+.pl-th--left { justify-content: flex-start; }
+.pl-th:hover { color: var(--text-2); }
+.pl-th.is-active { color: var(--accent); }
+.pl-th-caret { font-size: 8px; width: 6px; }
+
+.pl-row {
+  border-bottom: 1px solid var(--border-2);
+  cursor: pointer; transition: background var(--t);
+}
+.pl-row:hover { background: var(--surface-2); }
+.pl-row.is-selected { background: var(--accent-dim); }
+.pl-row.is-selected td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+.pl-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pl-table td { padding: 8px 12px; vertical-align: middle; }
+
+.pl-rank {
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-4);
+  font-variant-numeric: tabular-nums; text-align: left; width: 30px; padding-left: 14px;
+}
+
+/* Protocol name cell — avatar + name + ticker + sector/chains subline */
+.pl-name { text-align: left; min-width: 180px; }
+.pl-name { display: flex; align-items: center; gap: 9px; }
+.pl-avatar {
+  position: relative; width: 24px; height: 24px; border-radius: 6px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center; overflow: hidden;
+  background: var(--surface-3); border: 1px solid var(--border-2);
+}
+.pl-avatar-mono { font-family: var(--mono); font-size: 9px; color: var(--text-3); }
+.pl-avatar-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.pl-name-txt { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.pl-name-main {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--text); font-weight: 500; font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pl-ticker {
+  font-family: var(--mono); font-size: 9px; color: var(--text-4);
+  letter-spacing: 0.03em; padding: 1px 4px; border: 1px solid var(--border-2); border-radius: 3px;
+}
+.pl-name-sub { font-size: 10.5px; color: var(--text-4); white-space: nowrap; }
+.pl-chains { color: var(--text-4); }
+
+/* Type cell — colored dot + label */
+.pl-type { text-align: left; white-space: nowrap; }
+.pl-type-dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  margin-right: 6px; vertical-align: middle; box-shadow: 0 0 5px -1px currentColor;
+}
+.pl-type-lbl {
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-3);
+  letter-spacing: 0.02em; vertical-align: middle;
+}
+.pl-type-h { text-align: left; }
+
+.pl-num {
+  text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pl-dim { color: var(--text-4); }
+
+/* TVL cell — value + its 7d change stacked tight together, over a faint
+   log-scaled magnitude bar. The 7d move sits directly under the TVL figure so
+   the two read as one number, not separate columns. */
+.pl-tvl { position: relative; }
+.pl-tvl-fill {
+  position: absolute; right: 12px; bottom: 4px; height: 2px; max-width: calc(100% - 24px);
+  background: var(--ty-protocol); opacity: 0.5; border-radius: 2px;
+}
+.pl-tvl-nums {
+  position: relative; display: inline-flex; flex-direction: column; align-items: flex-end; gap: 1px;
+}
+.pl-tvl-val { color: var(--text); font-size: 12.5px; line-height: 1.15; }
+.pl-tvl-d7 {
+  font-family: var(--mono); font-size: 10px; line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.pl-tvl-d7--up { color: var(--success); }
+.pl-tvl-d7--dn { color: var(--danger); }
+.pl-tvl-d7--flat { color: var(--text-4); }
+
+/* Dual-sort TVL header — "TVL" + a smaller "7d" sit side by side over the cell */
+.pl-th-pair {
+  display: inline-flex; align-items: center; justify-content: flex-end; gap: 1px; width: 100%;
+}
+.pl-th-pair .pl-th { width: auto; padding: 9px 4px; }
+.pl-th-pair .pl-th:first-child { padding-left: 12px; }
+.pl-th-pair .pl-th:last-child { padding-right: 12px; font-size: 8.5px; }
+
+/* Coverage cell — proportional bar + mention count + narrative trajectory tag */
+.pl-cover { text-align: left; min-width: 150px; }
+.pl-cover-wrap { display: inline-flex; align-items: center; gap: 8px; }
+.pl-cov-bar-wrap {
+  width: 42px; height: 4px; border-radius: 2px; flex-shrink: 0;
+  background: var(--surface-3); overflow: hidden;
+}
+.pl-cov-bar { display: block; height: 100%; background: var(--accent); opacity: 0.45; border-radius: 2px; }
+/* Horyon (curated daily-brief) coverage reads as the brighter, solid gold bar —
+   raw source coverage is the fainter one above. */
+.pl-horyon { border-left: 1px dashed var(--border-2); }
+.pl-cov-bar--horyon { background: var(--accent-bright); opacity: 0.9; }
+.pl-mentions { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); font-variant-numeric: tabular-nums; min-width: 24px; }
+.pl-mentions-u { color: var(--text-4); }
+.pl-traj {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 100px; border: 1px solid var(--border-2); white-space: nowrap;
+}
+.pl-traj--accel       { color: var(--st-heating); border-color: var(--st-heating); }
+.pl-traj--develop     { color: var(--st-forming); border-color: var(--st-forming); }
+.pl-traj--established  { color: var(--text-2); }
+.pl-traj--moderating  { color: var(--st-cooling); border-color: var(--st-cooling); }
+.pl-traj--dormant     { color: var(--text-4); }
+
+/* Connected cell — overlapping avatar stack of top co-mentioned entities + count */
+.pl-conn-h { text-align: left; }
+.pl-conn { text-align: left; min-width: 120px; }
+.pl-conns { display: inline-flex; align-items: center; }
+.pl-conn-av {
+  position: relative; width: 20px; height: 20px; border-radius: 50%;
+  margin-left: -6px; flex-shrink: 0; overflow: hidden;
+  background: var(--surface-3); border: 1.5px solid var(--surface);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.pl-conn-av:first-child { margin-left: 0; }
+.pl-conn-mono { font-family: var(--mono); font-size: 7.5px; color: var(--text-3); line-height: 1; }
+.pl-conn-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.pl-conn-n {
+  margin-left: 6px; font-family: var(--mono); font-size: 10px; color: var(--text-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.pl-empty { padding: 30px 16px; text-align: center; color: var(--text-4); font-size: 12.5px; }
+
+@media (max-width: 720px) {
+  .pl-hide-sm { display: none; }
+}
+
+/* ── Phone: shrink the name cell + paddings so the data columns (TVL / 7d /
+   Coverage) are visible without horizontal scrolling. The name was eating the
+   whole viewport; here it truncates and drops its secondary chrome. ────────── */
+@media (max-width: 560px) {
+  .pl-table { font-size: 12px; }
+  .pl-table td { padding: 7px 6px; }
+  .pl-table thead th.pl-rank-h, .pl-table thead th.pl-name-h { padding: 8px 6px; }
+  .pl-th { padding: 8px 6px; gap: 2px; }
+
+  .pl-rank { width: 16px; padding-left: 8px; font-size: 10px; }
+
+  .pl-name { min-width: 0; max-width: 38vw; gap: 7px; }
+  .pl-avatar { width: 20px; height: 20px; border-radius: 5px; }
+  .pl-name-main { font-size: 12px; }
+  .pl-name-sub, .pl-ticker { display: none; }   /* drop subline + ticker chip on phone */
+
+  .pl-cover { min-width: 0; }
+  .pl-cover-wrap { gap: 6px; }
+  .pl-cov-bar-wrap, .pl-traj { display: none; }  /* keep the mention count, drop bar + tag */
+  .pl-horyon { border-left: none; }
+
+  .pl-tvl-val { font-size: 11.5px; }
+  .pl-tvl-d7 { font-size: 9.5px; }
+  .pl-tvl-fill { right: 6px; }
+
+  .pl-conn { min-width: 0; }
+}
+
+
+/* ── Index methodology info button + popover ────────────────────────────────
+   Sits in the Atlas header (Index view only); the popover explains how each
+   column is derived. The .infotip wrapper (shared <InfoTip>) handles
+   position:relative; this only styles the button + the right-aligned card. */
+.pl-info-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0;
+  border: 1px solid var(--border-3); border-radius: 50%;
+  background: transparent; color: var(--text-3); cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.pl-info-btn:hover, .pl-info-btn.is-active {
+  color: var(--accent); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.pl-info-pop {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 40;
+  width: min(340px, 88vw);
+  padding: 14px 15px 12px;
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: 10px;
+  box-shadow: 0 12px 30px -8px rgba(0, 0, 0, 0.45);
+  font-family: var(--display);
+  animation: pl-info-in 0.12s ease;
+}
+@keyframes pl-info-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.pl-info-title {
+  font-family: var(--display-serif); font-size: 14px; font-weight: 600;
+  color: var(--text); margin: 0 0 6px;
+}
+.pl-info-lede {
+  font-size: 12px; line-height: 1.5; color: var(--text-2); margin: 0 0 10px;
+}
+.pl-info-lede strong { color: var(--text); font-weight: 600; }
+.pl-info-defs { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+.pl-info-defs dt {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--accent); padding-top: 2px; white-space: nowrap;
+}
+.pl-info-defs dd {
+  margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--text-3);
+}
+.pl-info-foot {
+  margin: 10px 0 0; padding-top: 9px; border-top: 1px solid var(--border-3);
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.02em;
+  color: var(--text-4); line-height: 1.5;
+}

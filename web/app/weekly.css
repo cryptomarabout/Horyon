@@ -1,0 +1,516 @@
+/* ════════════════════════════════════════════════════════════════════════════
+   Weekly Market Review — institutional research-publication styling.
+   Self-contained `wr-*` namespace (mirrors the Research `rsrch-*` pattern). The
+   legacy `pw-*`/`wm-*` weekly classes are untouched (still used by WeeklyMacro on
+   the Daily page + the legacy WeeklyPanel). Brand tokens only — no hard-coded
+   colours — so dark/light both work.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.wr {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 8px 0 64px;
+  font-family: var(--display);
+}
+
+/* ── Masthead / cover ─────────────────────────────────────────────────────── */
+.wr-masthead { padding: 26px 0 22px; }
+.wr-title {
+  font-family: var(--display-serif);
+  font-weight: 600;
+  font-size: clamp(38px, 6vw, 58px);
+  line-height: 0.98;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0;
+}
+.wr-dek {
+  font-family: var(--display-serif);
+  font-style: italic;
+  font-size: clamp(18px, 2.4vw, 23px);
+  line-height: 1.4;
+  color: var(--text-2);
+  max-width: 660px;
+  margin: 16px 0 0;
+}
+.wr-byline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 10px;
+  margin-top: 22px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.wr-byline > span { white-space: nowrap; }
+.wr-byline .sep { color: var(--text-4); }
+.wr-byline .wr-byline-range { color: var(--text-2); }
+.wr-tone {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-2);
+}
+.wr-tone-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-3);
+}
+.wr-tone[data-regime="Risk-on"]  .wr-tone-dot { background: var(--success); }
+.wr-tone[data-regime="Risk-off"] .wr-tone-dot { background: var(--danger); }
+.wr-tone[data-regime="Neutral"]  .wr-tone-dot { background: var(--amber); }
+
+/* Masthead rule — thick gold hairline over a thin divider (classic masthead). */
+.wr-rule {
+  height: 2px;
+  background: var(--accent);
+  opacity: 0.85;
+  margin: 22px 0 0;
+}
+.wr-rule + .wr-rule { height: 1px; background: var(--border-2); opacity: 1; margin-top: 2px; }
+
+/* ── Market snapshot — slim single-row data ribbon ────────────────────────── */
+.wr-snapshot { margin: 22px 0 8px; }
+.wr-snapshot-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-4);
+  margin-bottom: 9px;
+}
+.wr-stats {
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.wr-stats::-webkit-scrollbar { display: none; }
+.wr-stat {
+  flex: 1 0 auto;
+  min-width: max-content;
+  padding: 10px 16px;
+  border-right: 1px solid var(--border);
+  white-space: nowrap;
+}
+.wr-stat:last-child { border-right: none; }
+.wr-stat-label {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+.wr-stat-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 5px;
+}
+.wr-stat-value {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.wr-stat-value.up { color: var(--success); }
+.wr-stat-value.dn { color: var(--danger); }
+.wr-stat-delta {
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+.wr-stat-delta.up { color: var(--success); }
+.wr-stat-delta.dn { color: var(--danger); }
+
+/* ── Contents rail (sticky, in feed-head) — replaces the tabs ─────────────── */
+.wr-contents {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.wr-contents::-webkit-scrollbar { display: none; }
+.wr-contents-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-4);
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+.wr-toc {
+  appearance: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 100px;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+  transition: color var(--t), background var(--t);
+}
+.wr-toc:hover { color: var(--text-2); }
+.wr-toc-num { font-size: 9px; color: var(--text-4); }
+.wr-toc.active { color: var(--accent); background: var(--accent-dim); }
+.wr-toc.active .wr-toc-num { color: var(--accent); }
+
+/* ── Report body + sections ───────────────────────────────────────────────── */
+.wr-body { margin-top: 30px; }
+.wr-section {
+  scroll-margin-top: 96px;
+  padding-top: 30px;
+  margin-top: 30px;
+  border-top: 1px solid var(--border);
+}
+.wr-section:first-child { border-top: none; margin-top: 8px; padding-top: 8px; }
+.wr-sec-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.wr-sec-num {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.wr-sec-title {
+  font-family: var(--display-serif);
+  font-weight: 600;
+  font-size: clamp(23px, 3vw, 29px);
+  line-height: 1.1;
+  letter-spacing: -0.005em;
+  color: var(--text);
+  margin: 0;
+}
+
+/* Prose / lede (Market) */
+.wr-prose {
+  font-size: 16px;
+  line-height: 1.72;
+  color: var(--text);
+  max-width: 680px;
+}
+.wr-prose + .wr-prose { margin-top: 14px; }
+.wr-prose b, .wr-prose strong { font-weight: 600; color: var(--text); }
+.wr-lede::first-letter {
+  font-family: var(--display-serif);
+  font-weight: 600;
+  font-size: 3.4em;
+  line-height: 0.78;
+  float: left;
+  padding: 6px 10px 0 0;
+  color: var(--accent);
+}
+
+/* Generic editorial list (DeFi, Narratives) */
+.wr-list { display: flex; flex-direction: column; gap: 0; max-width: 720px; }
+.wr-li {
+  position: relative;
+  padding: 13px 0 13px 22px;
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+  border-bottom: 1px solid var(--border);
+}
+.wr-li:last-child { border-bottom: none; }
+.wr-li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 21px;
+  width: 7px; height: 1px;
+  background: var(--accent);
+  opacity: 0.7;
+}
+.wr-li b, .wr-li strong { color: var(--text); font-weight: 600; }
+.wr .pct-up { color: var(--success); font-variant-numeric: tabular-nums; }
+.wr .pct-dn { color: var(--danger); font-variant-numeric: tabular-nums; }
+
+/* ── Movers league table — one block, gainer + loser per line ─────────────── */
+.wr-movers { display: flex; flex-direction: column; }
+.wr-mv-head,
+.wr-mv-row {
+  display: grid;
+  grid-template-columns: 1.5em 1fr 1fr;
+  align-items: center;
+  gap: 0 12px;
+}
+.wr-mv-head {
+  align-items: baseline;
+  padding-bottom: 7px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--border-2);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.wr-mv-head .gain { color: var(--success); }
+.wr-mv-head .loss { color: var(--danger); }
+.wr-mv-row { border-bottom: 1px solid var(--border); }
+.wr-mv-row:last-child { border-bottom: none; }
+.wr-mv-rank {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--text-4);
+  text-align: right;
+}
+.wr-mv-cell {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 9px;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+}
+.wr-mv-fill {
+  position: absolute;
+  left: 0; top: 3px; bottom: 3px;
+  border-radius: var(--radius-sm);
+  opacity: 0.1;
+  pointer-events: none;
+}
+.wr-mv-fill.up { background: var(--success); }
+.wr-mv-fill.dn { background: var(--danger); }
+.wr-mv-sym {
+  position: relative;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+.wr-mv-pct {
+  position: relative;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.wr-mv-pct.up { color: var(--success); }
+.wr-mv-pct.dn { color: var(--danger); }
+
+/* ── Key Stories — numbered, clickable through to the daily brief ─────────── */
+.wr-stories { max-width: 720px; }
+.wr-story {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: padding-left var(--t);
+}
+.wr-story:last-child { border-bottom: none; }
+.wr-story:hover { padding-left: 6px; }
+.wr-story-num {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-4);
+  flex-shrink: 0;
+  min-width: 18px;
+  padding-top: 2px;
+}
+.wr-story:hover .wr-story-num { color: var(--accent); }
+.wr-story-title {
+  flex: 1;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.wr-story:hover .wr-story-title { color: var(--accent-bright); }
+.wr-story-src {
+  flex-shrink: 0;
+  color: var(--text-4);
+  font-size: 13px;
+  text-decoration: none;
+  transition: color var(--t);
+}
+.wr-story-src:hover { color: var(--accent); }
+.wr-story-go {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-4);
+  opacity: 0;
+  transition: opacity var(--t);
+}
+.wr-story:hover .wr-story-go { opacity: 1; }
+
+/* ── Outlook — watch points (list) + single-thought pull-quote ────────────── */
+.wr-watch {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-width: 720px;
+}
+.wr-watch-item {
+  display: flex;
+  align-items: baseline;
+  gap: 13px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+.wr-watch-item:last-child { border-bottom: none; }
+.wr-watch-mark {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  line-height: 1.55;
+}
+.wr-watch-item b, .wr-watch-item strong { color: var(--text); font-weight: 600; }
+
+.wr-outlook {
+  border-left: 2px solid var(--accent);
+  padding: 4px 0 4px 22px;
+  max-width: 680px;
+}
+.wr-outlook p {
+  font-family: var(--display-serif);
+  font-size: 21px;
+  font-style: italic;
+  line-height: 1.5;
+  color: var(--text);
+  margin: 0;
+}
+
+.wr-empty {
+  font-size: 14px;
+  color: var(--text-3);
+  padding: 8px 0;
+}
+
+/* ── Colophon footer ──────────────────────────────────────────────────────── */
+.wr-colophon {
+  margin-top: 48px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  line-height: 1.7;
+  color: var(--text-4);
+  text-transform: uppercase;
+}
+
+/* ── Archive (issue) navigation ───────────────────────────────────────────── */
+.wr-issuenav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: relative;
+}
+.wr-issue-step {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  cursor: pointer;
+  padding: 5px 11px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  transition: color var(--t), border-color var(--t), background var(--t);
+}
+.wr-issue-step:hover:not(.is-disabled) { color: var(--accent); border-color: var(--accent-ring); background: var(--accent-dim); }
+.wr-issue-step.is-disabled { opacity: 0.32; cursor: default; }
+.wr-issue-current {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+.wr-issue-current:hover { color: var(--text); }
+.wr-issue-current .caret { color: var(--text-4); margin-left: 4px; }
+.wr-issue-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  min-width: 248px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--surface-glass);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  padding: 6px;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.4);
+}
+.wr-issue-opt {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  appearance: none;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+  transition: background var(--t), color var(--t);
+}
+.wr-issue-opt:hover { background: var(--surface-3); color: var(--text); }
+.wr-issue-opt.is-active { color: var(--accent); background: var(--accent-dim); }
+.wr-issue-opt-latest { margin-left: auto; color: var(--accent); font-size: 9px; letter-spacing: 0.1em; }
+
+/* ── Responsive ───────────────────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .wr-masthead { padding-top: 18px; }
+  .wr-mv-head, .wr-mv-row { grid-template-columns: 1.3em 1fr 1fr; gap: 0 8px; }
+  .wr-mv-cell { padding: 6px 7px; gap: 6px; }
+  .wr-mv-sym, .wr-mv-pct { font-size: 11.5px; }
+  .wr-stat { padding: 9px 14px; }
+  .wr-lede::first-letter { font-size: 2.8em; }
+  .wr-outlook p { font-size: 18px; }
+}
+
+/* ── Print — reads as a clean PDF research note ───────────────────────────── */
+@media print {
+  .header, .feed-head, .market-bandeau { display: none !important; }
+  .wr { max-width: 100%; color: #111; }
+  .wr-section { break-inside: avoid; }
+}

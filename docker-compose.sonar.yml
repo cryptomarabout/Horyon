@@ -1,0 +1,69 @@
+# SonarQube Community Edition — code quality & security analysis
+#
+# Start the server:
+#   docker compose -f docker-compose.sonar.yml up -d
+#
+# Run a scan (after the server is up):
+#   SONAR_TOKEN=<token> scripts/sonar-scan.sh
+#
+# First-time setup:
+#   1. sudo sysctl -w vm.max_map_count=524288   (required by Elasticsearch inside SonarQube)
+#      To persist across reboots: echo 'vm.max_map_count=524288' | sudo tee -a /etc/sysctl.conf
+#   2. docker compose -f docker-compose.sonar.yml up -d
+#   3. Open http://localhost:9000 (admin / admin — change on first login)
+#   4. Create a project token at http://localhost:9000/account/security
+#   5. Add SONAR_TOKEN=<token> to your shell or .env.local
+
+services:
+  sonarqube-db:
+    image: postgres:16-alpine
+    container_name: sonarqube-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: sonar
+      POSTGRES_DB: sonarqube
+    volumes:
+      - sonarqube_db:/var/lib/postgresql/data
+    networks:
+      - sonar
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonarqube"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  sonarqube:
+    image: sonarqube:lts-community
+    container_name: sonarqube
+    restart: unless-stopped
+    depends_on:
+      sonarqube-db:
+        condition: service_healthy
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonarqube-db:5432/sonarqube
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: sonar
+    ports:
+      # Bound to localhost only — not exposed to the public internet.
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_logs:/opt/sonarqube/logs
+      - sonarqube_extensions:/opt/sonarqube/extensions
+    networks:
+      - sonar
+    ulimits:
+      nofile:
+        soft: 131072
+        hard: 131072
+
+volumes:
+  sonarqube_db:
+  sonarqube_data:
+  sonarqube_logs:
+  sonarqube_extensions:
+
+networks:
+  sonar:
+    name: sonar

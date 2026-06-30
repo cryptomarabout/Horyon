@@ -11,6 +11,8 @@ Pipeline (per bullet):
        s4 entity weight (TVL or 30d mention count)                           (0–20)
        s5 semantic criticality (keyword buckets)                             (0–15)
        s6 novelty vs last 7 days of digests (semantic, Jaccard)              (0– 5)
+       s7 saturation PENALTY: protocol already dominates recent coverage     (0–-12)
+          (bypassed for hacks/≥$500M events so real news is never buried)
   2. Credibility penalty: ×0.5 when ONLY Tier-3 (clickbait) sources reported it.
   3. Temporal decay (story age at digest time).
 
@@ -35,7 +37,7 @@ import re
 from datetime import date as date_t, datetime, time, timezone
 from urllib.parse import urlparse
 
-from . import db, llm, prompts
+from . import db
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +52,13 @@ _MULT = {
 # ── Signal 5: semantic criticality keyword buckets (max bucket, not sum) ────
 _KEYWORDS = {
     15: ["hack", "exploit", "drain", "blacklist", "freeze", "rug", "breach", "attack"],
-    11: ["vulnerability", "emergency", "pause", "governance", "vote", "proposal", "shutdown"],
+    # Funding & M&A rank alongside governance — capital flows are high-signal events the
+    # feed should surface. ("series a"/"series b" are kept as phrases to avoid matching a
+    # bare "series".) Paired with the digest-prompt FUNDING & M&A include rule.
+    11: ["vulnerability", "emergency", "pause", "governance", "vote", "proposal", "shutdown",
+         "raise", "raises", "raised", "funding", "fundraise", "seed round",
+         "series a", "series b", "acquire", "acquires", "acquired", "acquisition",
+         "merger", "buyout"],
     7:  ["mainnet", "upgrade", "v2", "v3", "launch", "audit", "migration", "deploy"],
     3:  ["partnership", "integration", "update", "support", "adds", "enables"],
 }
@@ -169,10 +177,18 @@ FEED_CREDIBILITY = {
     "coindesk.com": 1.2,
     "bankless.com": 1.2,
     "insights.glassnode.com": 1.2,
-    
+    # Kaiko: premium institutional research (exclusive data/analysis, no RSS — scraped directly).
+    # Weight 3.0 means a single Kaiko article alone reaches the ≥3.0 corroboration threshold → s1=25 (max).
+    "kaiko.com": 3.0,
+    "www.kaiko.com": 3.0,
+    "@kaikodata": 3.0,  # Kaiko's Twitter — same institutional source
+
     # Low Trust / Clickbait (Tier 3) - weight 0.4
     "@watcherguru": 0.4,
     "@wublockchain": 0.4,
+    # AI "alpha" bots: high-velocity, often overstate announcements as facts (e.g. framed
+    # Circle's testnet-only Arc as a live chain with "forced" migrations). Discount their weight.
+    "@aixbt_agent": 0.4,
 }
 
 
@@ -217,6 +233,66 @@ class _RefData:
             log.debug("scoring: could not load protocol TVLs", exc_info=True)
         # covered story word sets from last 7 days (novelty)
         self.covered_word_sets: list[set[str]] = []
+        # entity term (lower) → number of distinct recent digest days it was covered
+        # (Signal 7 saturation: dampens protocols that already dominate recent coverage).
+        self.recent_entity_coverage: dict[str, int] = {}
+
+
+# ── Signal 7: recent-coverage saturation ─────────────────────────────────────
+# Base-layer / generic terms that appear in nearly every DeFi bullet — they would
+# trip the saturation penalty constantly, so they NEVER trigger it (the penalty is
+# meant to thin out specific over-covered protocols, not Ethereum/Bitcoin/USDC).
+_SATURATION_EXCLUDE = frozenset({
+    "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "crypto", "defi",
+    "stablecoin", "stablecoins", "usdc", "usdt", "tether", "dai", "weth",
+}) | _CHAIN_WORDS
+
+
+def _build_recent_entity_coverage(
+    entity_terms: list[tuple[str, int]], before_date: date_t
+) -> dict[str, int]:
+    """For each entity term, count DISTINCT days in the last 7 digests it was covered.
+
+    This is the signal behind the saturation penalty: a protocol mentioned in a bullet
+    on ≥3 of the last 7 days is "saturating" the feed, so a routine new bullet about it
+    is worth less (unless it carries genuinely new weight — see ``_signal_saturation``).
+    """
+    coverage: dict[str, set] = {}
+    try:
+        rows = db.get_digest_contents_for_dedup(days=7, before_date=before_date)
+    except Exception:
+        log.debug("scoring: could not load coverage context", exc_info=True)
+        return {}
+    tag_re = re.compile(r"<[^>]+>")
+    pats = [
+        (term.lower(), re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE))
+        for term, _ in entity_terms
+        if term.lower() not in _SATURATION_EXCLUDE
+    ]
+    for d, content in rows:
+        if not content:
+            continue
+        text = tag_re.sub(" ", content)
+        for term_l, pat in pats:
+            if pat.search(text):
+                coverage.setdefault(term_l, set()).add(d)
+    return {term_l: len(days) for term_l, days in coverage.items()}
+
+
+def _signal_saturation(entities: list[tuple[str, int]], ref: _RefData) -> int:
+    """Penalty (0–12) for bullets about a protocol that already dominates recent coverage.
+
+    Returns the penalty to SUBTRACT from the bullet's positive signals. Anchored to the
+    most-saturated entity in the bullet: covered on ≥5 of the last 7 days → 12, ≥3 → 7.
+    """
+    best = 0
+    for term, _ in entities:
+        best = max(best, ref.recent_entity_coverage.get(term.lower(), 0))
+    if best >= 5:
+        return 12
+    if best >= 3:
+        return 7
+    return 0
 
 
 def _build_covered_word_sets(before_date: date_t) -> list[set[str]]:
@@ -390,6 +466,7 @@ def compute_importance_scores(bullets: list[dict], digest_date: str) -> list[dic
     try:
         ref = _RefData()
         ref.covered_word_sets = _build_covered_word_sets(day)
+        ref.recent_entity_coverage = _build_recent_entity_coverage(ref.entity_terms, day)
     except Exception:
         log.warning("scoring: reference data load failed — scores set to None", exc_info=True)
         for b in out:
@@ -406,22 +483,31 @@ def compute_importance_scores(bullets: list[dict], digest_date: str) -> list[dic
             terms = [t for t, _ in entities] or _significant_words(text)
 
             feed = db.get_feed_items_matching_terms(terms, day, window_hours=24) if terms else []
-            
-            # Source key and credibility parsing
-            source_keys = {get_source_key(r["link"]) for r in feed if r.get("link")}
+
+            # Exclude thin_content items from the corroboration and velocity signals.
+            # A 50-char teaser blurb (e.g. Blockworks newsletters) is not strong evidence
+            # that a story is real — it just means the site mentioned a keyword. Boilerplate
+            # and handle-title items are kept for velocity (they still prove publication
+            # timing) but excluded from amount-text to avoid inflating financial_magnitude.
+            substantive_feed = [r for r in feed
+                                 if r.get("quality_flag", "ok") != "thin_content"]
+
+            source_keys = {get_source_key(r["link"]) for r in substantive_feed if r.get("link")}
             source_keys.discard("")
             credibilities = [get_source_credibility(sk) for sk in source_keys]
-            
-            # Domain tracking (for legacy schema compatibility)
+
             domains = {
                 urlparse(r["link"]).netloc.lower().removeprefix("www.")
-                for r in feed if r.get("link")
+                for r in substantive_feed if r.get("link")
             }
             domains.discard("")
 
+            # Velocity uses all matching items (thin or not) — the timestamp is valid.
             timestamps = [r["ts"] for r in feed if r.get("ts")]
-            # amount text includes source descriptions when available
-            amount_text = text + " " + " ".join((r.get("content") or "")[:300] for r in feed[:10])
+            # Amount scan restricted to substantive items only (not thin teasers/bios).
+            amount_text = text + " " + " ".join(
+                (r.get("content") or "")[:300] for r in substantive_feed[:10]
+            )
 
             s1 = _signal_corroboration(credibilities)
             s2 = _signal_amount(amount_text)
@@ -430,6 +516,16 @@ def compute_importance_scores(bullets: list[dict], digest_date: str) -> list[dic
             s5 = _signal_criticality(text)
             s6 = _signal_novelty(title, ref)
             p_total = min(100, s1 + s2 + s3 + s4 + s5 + s6)
+
+            # Signal 7 (penalty): recent-coverage saturation. A routine new bullet about a
+            # protocol that has dominated the last week is worth less — UNLESS it carries
+            # genuinely new weight (a hack/exploit s5≥15, or a ≥$500M event s2≥16), in which
+            # case it bypasses the penalty entirely. This thins out the Aave/Morpho/Pendle
+            # yield-rotation drumbeat without burying real news about them.
+            s7 = _signal_saturation(entities, ref)
+            if s5 >= 15 or s2 >= 16:
+                s7 = 0
+            p_total = max(0, p_total - s7)
 
             # Apply low credibility penalty if only Tier 3 clickbait sources reported it
             max_cred = max(credibilities) if credibilities else 1.0
@@ -442,6 +538,7 @@ def compute_importance_scores(bullets: list[dict], digest_date: str) -> list[dic
             b["_first_seen_at"] = min(timestamps) if timestamps else ref_time
             b["_breakdown_partial"] = {
                 "s1": s1, "s2": s2, "s3": s3, "s4": s4, "s5": s5, "s6": s6,
+                "s7_saturation": -s7,
                 "python_total": p_total,
             }
         except Exception:
@@ -451,7 +548,8 @@ def compute_importance_scores(bullets: list[dict], digest_date: str) -> list[dic
             b["_source_count"] = 0
             b["_first_seen_at"] = ref_time
             b["_breakdown_partial"] = {"s1": 0, "s2": 0, "s3": 0, "s4": 0,
-                                       "s5": 0, "s6": 0, "python_total": 0}
+                                       "s5": 0, "s6": 0, "s7_saturation": 0,
+                                       "python_total": 0}
 
     # ── Finalize: decay (LLM passes removed) ──
     for b in out:

@@ -1,0 +1,8 @@
+[run]
+relative_files = True
+source = app
+
+[report]
+omit =
+    app/__init__.py
+    **/__pycache__/**

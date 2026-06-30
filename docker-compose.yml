@@ -7,8 +7,10 @@ services:
       POSTGRES_USER: crypto
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: crypto
+    # Bound to localhost only — the DB must never be reachable from the public internet.
+    # Use an SSH tunnel for remote psql access.
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - crypto_db:/var/lib/postgresql/data
       - ./deploy/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
@@ -75,15 +77,14 @@ services:
     image: horyon-web
     container_name: horyon-web
     restart: always
+    # PUBLIC, internet-facing container — ZERO paid-LLM egress (see api/search/route.js).
+    # No LLM provider keys are injected here on purpose: nothing in web/app reaches
+    # web/lib/llm.js, so handing this container OPENROUTER/NIM keys would only add blast
+    # radius if it were ever compromised. It connects as the least-privilege `horyon_web`
+    # role (SELECT-only + UPDATE on digest_threads), NOT the table owner — see
+    # deploy/web_db_role.sql.
     environment:
-      - DATABASE_URL=postgresql://crypto:${POSTGRES_PASSWORD}@db:5432/crypto
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
-      - OPENROUTER_MODEL=${OPENROUTER_MODELS}
-      - NIM_API_KEY=${NIM_API_KEY}
-      - NIM_BASE_URL=${NIM_BASE_URL:-https://integrate.api.nvidia.com/v1}
-      - NIM_MODELS=${NIM_MODELS}
-      - LLM_TIMEOUT_SEC=${LLM_TIMEOUT_SEC:-60}
+      - DATABASE_URL=postgresql://horyon_web:${WEB_DB_PASSWORD}@db:5432/crypto
       - OLLAMA_HOST=http://host.docker.internal:11434
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
     extra_hosts:
@@ -106,6 +107,9 @@ services:
       - "443:443"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile
+      # Static marketing landing served at the apex (horyon.xyz). Read-only bind mount;
+      # edits to deploy/landing/* are live after the page is re-requested (no rebuild).
+      - ./deploy/landing:/srv/landing:ro
       - crypto_caddy:/data
     depends_on:
       - bot

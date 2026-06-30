@@ -1,73 +1,115 @@
-import { Suspense } from "react";
+import { Suspense, cache } from "react";
 import { notFound } from "next/navigation";
-import { getDigest, getTvlWithChange, getBulletAnalyses, getBulletTimes, listDigests, getPodcastsForDate } from "../../../lib/db";
-import { getMarketData } from "../../../lib/prices";
-import { parseDigest } from "../../../lib/digest";
-import { buildProjectHints } from "../../../lib/projects";
+import { getDigest, getBulletAnalyses, getBulletTimes, listDigests, getPodcastsForDate, getAudioBriefing } from "../../../lib/db";
+import { parseDigest, timeAgo, sourceLabel, isValidDigestDate } from "../../../lib/digest";
 import BulletFeed from "../../components/BulletFeed";
+import FeedSkeleton from "../../components/FeedSkeleton";
 
-export const dynamic = "force-dynamic";
+// De-dupe the digest read: generateMetadata and the page render both need it, and without
+// memoization that's two identical queries per request. React cache() collapses them into one.
+const getDigestCached = cache(getDigest);
 
-function timeAgo(isoStr) {
-  if (!isoStr) return null;
-  try {
-    const diffMs = Date.now() - new Date(isoStr + "Z").getTime();
-    if (diffMs < 0) return "just now";
-    const diffMin = Math.floor(diffMs / 60000);
-    if (diffMin < 1)  return "just now";
-    if (diffMin < 60) return `${diffMin}m ago`;
-    const hrs = Math.floor(diffMin / 60);
-    if (hrs < 24) return `${hrs}h ago`;
-    return `${Math.floor(hrs / 24)}d ago`;
-  } catch { return null; }
+// ── Per-digest metadata (SEO + social cards) ────────────────────────────────
+const SITE_URL = "https://app.horyon.xyz";
+const MONTHS_LONG = ["January","February","March","April","May","June","July",
+  "August","September","October","November","December"];
+
+function prettyDate(dateStr) {
+  const d = new Date(dateStr + "T00:00:00Z");
+  return `${MONTHS_LONG[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
 }
 
-// ── Source label ───────────────────────────────────────────────────────────
-const DOMAIN_NAMES = {
-  "cointelegraph.com": "CoinTelegraph", "coindesk.com": "CoinDesk",
-  "theblock.co": "The Block", "decrypt.co": "Decrypt",
-  "blockworks.co": "Blockworks", "beincrypto.com": "BeInCrypto",
-  "cryptoslate.com": "CryptoSlate", "bitcoinmagazine.com": "Bitcoin Magazine",
-  "dlnews.com": "DL News", "thedefiant.io": "The Defiant",
-  "bankless.com": "Bankless", "unchainedcrypto.com": "Unchained",
-  "protos.com": "Protos", "wired.com": "Wired",
-  "reuters.com": "Reuters", "bloomberg.com": "Bloomberg",
-};
+export async function generateMetadata({ params }) {
+  if (!isValidDigestDate(params.date)) return {};
+  const row = await getDigestCached(params.date);
+  if (!row) return {};
 
-function sourceLabel(url) {
-  if (!url) return null;
-  try {
-    const u    = new URL(url);
-    const host = u.hostname.replace(/^www\./, "");
-    if (host === "x.com" || host === "twitter.com" || host.includes("nitter.")) {
-      const user = u.pathname.split("/").filter(Boolean)[0];
-      if (user && !["i","search","explore","home"].includes(user))
-        return { type: "twitter", name: "@" + user };
-      return { type: "twitter", name: "X" };
-    }
-    if (DOMAIN_NAMES[host]) return { type: "news", name: DOMAIN_NAMES[host] };
-    const base = host.split(".")[0];
-    return { type: "news", name: base.charAt(0).toUpperCase() + base.slice(1) };
-  } catch { return null; }
+  const { bullets } = parseDigest(row.content);
+  const title = `Crypto Intelligence · ${prettyDate(params.date)}`;
+  // Lead with the day's top headlines so the snippet/social description is substantive.
+  const lead = bullets.slice(0, 3).map(b => b.title).filter(Boolean).join(" · ");
+  const description = lead
+    ? `${lead}. — Horyon's daily crypto-intelligence digest.`.slice(0, 300)
+    : `Horyon's crypto-intelligence digest for ${prettyDate(params.date)}.`;
+  const canonical = `${SITE_URL}/d/${params.date}`;
+  const ogImage = `${SITE_URL}/api/og?date=${params.date}`;
+
+  return {
+    title,
+    description,
+    alternates: { canonical },
+    openGraph: {
+      type: "article",
+      title: `${title} · Horyon`,
+      description,
+      url: canonical,
+      publishedTime: params.date,
+      images: [{ url: ogImage, width: 1200, height: 628, alt: title }],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title: `${title} · Horyon`,
+      description,
+      images: [ogImage],
+    },
+  };
 }
 
 // ── Page ──────────────────────────────────────────────────────────────────
-export default async function DigestPage({ params }) {
-  const [row, tvl, items, podcasts] = await Promise.all([
-    getDigest(params.date),
-    getTvlWithChange(),
+// Synchronous shell: emits the JSON-LD + a feed skeleton as the first byte, then streams
+// the data-heavy feed in via <Suspense> rather than blocking the whole render on the slowest
+// query. The date is validated here so /d/garbage still 404s before any DB work.
+export default function DigestPage({ params }) {
+  // Reject malformed date params before they hit a SQL date cast (otherwise a public
+  // URL like /d/garbage — or a numeric-but-invalid one like /d/2026-13-99 — throws and
+  // surfaces as a 500 / naked error page instead of a clean 404).
+  if (!isValidDigestDate(params.date)) notFound();
+
+  const canonicalUrl = `${SITE_URL}/d/${params.date}`;
+  const digestTitle = `Crypto Intelligence · ${prettyDate(params.date)}`;
+
+  return (
+    <>
+    <script
+      type="application/ld+json"
+      dangerouslySetInnerHTML={{ __html: JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "Article",
+        headline: digestTitle,
+        datePublished: params.date,
+        url: canonicalUrl,
+        publisher: { "@type": "Organization", name: "Horyon", url: SITE_URL },
+      }) }}
+    />
+    <article className="digest">
+      <Suspense fallback={<FeedSkeleton />}>
+        <DigestFeed date={params.date} />
+      </Suspense>
+    </article>
+    </>
+  );
+}
+
+async function DigestFeed({ date }) {
+  // Wave 1: everything that only needs the date (not parsed bullets). listDigests is cached;
+  // getDigestCached shares its read with generateMetadata. tvl/market are gone — BulletFeed
+  // never used them; they live only in the footer ticker (layout.js).
+  const [row, items, podcasts, audio, bulletAnalyses] = await Promise.all([
+    getDigestCached(date),
     listDigests(),
-    getPodcastsForDate(params.date),
+    getPodcastsForDate(date),
+    getAudioBriefing(date),
+    getBulletAnalyses(date),
   ]);
   if (!row) notFound();
 
   const { bullets } = parseDigest(row.content);
-  const [projectHints, bulletAnalyses, market, bulletTimes] = await Promise.all([
-    buildProjectHints(bullets),
-    getBulletAnalyses(params.date),
-    getMarketData(),
-    getBulletTimes(bullets.map(b => b.link)),
-  ]);
+
+  // Wave 2: only what needs the parsed bullet list (links for pub-date lookup).
+  // buildProjectHints is NOT awaited — BulletFeed fetches /api/hints/[date]
+  // client-side after mount so the N*2 regex scans + DeFiLlama API calls
+  // never block the initial render.
+  const bulletTimes = await getBulletTimes(bullets.map(b => b.link));
 
   const enrichedBullets = bullets.map(b => ({
     title: b.title, body: b.body, hack: b.hack,
@@ -75,23 +117,15 @@ export default async function DigestPage({ params }) {
     ts: b.link ? (bulletTimes[b.link] ?? null) : null,
   }));
 
-  const signalsAgo = timeAgo(row.created_at);
-
   return (
-    <article className="digest">
-      <Suspense fallback={null}>
-        <BulletFeed
-          bullets={enrichedBullets}
-          projectHints={projectHints}
-          analyses={bulletAnalyses}
-          podcasts={podcasts}
-          items={items}
-          currentDate={row.date}
-          signalsAgo={signalsAgo}
-          tvl={tvl}
-          market={market}
-        />
-      </Suspense>
-    </article>
+    <BulletFeed
+      bullets={enrichedBullets}
+      analyses={bulletAnalyses}
+      podcasts={podcasts}
+      items={items}
+      currentDate={row.date}
+      signalsAgo={timeAgo(row.created_at)}
+      audio={audio}
+    />
   );
 }

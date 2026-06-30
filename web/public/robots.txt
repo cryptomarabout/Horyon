@@ -1,2 +1,10 @@
+# Horyon — public read site. Allow crawling of the digest pages; keep admin
+# surfaces and the JSON API out of the index (the API is for the app, not crawlers;
+# /monitor + /threads are basic-auth gated anyway).
 User-agent: *
-Disallow: /
+Allow: /
+Disallow: /api/
+Disallow: /monitor
+Disallow: /threads
+
+Sitemap: https://app.horyon.xyz/sitemap.xml

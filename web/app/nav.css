@@ -1,0 +1,735 @@
+/* ── Header nav menus + dropdowns ────────────────────────────────────────── */
+@media (min-width: 541px) {
+  .nav-search-center { position: static; inset: auto; flex: 1 1 auto; }
+}
+
+.nav-dropdown {
+  position: absolute; top: calc(100% + 9px); left: 0; z-index: 120;
+  width: 340px; max-width: 80vw; max-height: 66vh; overflow-y: auto;
+  background: var(--surface-glass, var(--surface)); backdrop-filter: blur(20px) saturate(1.4);
+  border: 1px solid var(--accent-ring); border-radius: var(--radius);
+  box-shadow: var(--glow-accent, 0 0 1px rgba(212,175,55,0.4)), 0 20px 50px rgba(0,0,0,0.45);
+  padding: 6px;
+  animation: nav-dd-in 0.14s cubic-bezier(0.25,0,0,1);
+}
+@keyframes nav-dd-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.nav-dd-list { display: flex; flex-direction: column; gap: 1px; }
+.nav-dd-item {
+  display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left;
+  background: none; border: none; cursor: pointer; text-decoration: none;
+  padding: 9px 10px; border-radius: var(--radius-sm); color: inherit;
+  transition: background var(--t);
+}
+.nav-dd-item:hover { background: rgba(255,255,255,0.05); }
+.nav-dd-glyph { font-size: 14px; line-height: 1.3; flex-shrink: 0; width: 16px; text-align: center; }
+.nav-dd-sent { color: var(--text-2); }
+.nav-dd-rot { font-family: var(--mono); font-size: 13px; flex-shrink: 0; width: 16px; text-align: center; color: var(--accent); }
+.nav-dd-logo { width: 22px; height: 22px; border-radius: 5px; flex-shrink: 0; object-fit: cover; }
+.nav-dd-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.nav-dd-title {
+  font-family: var(--display-serif, Georgia, serif); font-size: 14px; font-weight: 600;
+  color: var(--text); line-height: 1.25;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.nav-dd-sub { font-family: var(--mono); font-size: 10px; color: var(--text-3); }
+.nav-dd-time { font-family: var(--mono); font-size: 10px; color: var(--accent); flex-shrink: 0; align-self: center; }
+
+@media (min-width: 541px) and (max-width: 768px) {
+  .nav-search { width: 180px; }
+  .brand-sub { display: none; }
+}
+
+
+/* Brand link */
+a.brand { cursor: pointer; transition: opacity var(--t); }
+a.brand:hover { opacity: 0.88; }
+
+.main-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-left: 22px;
+}
+.main-nav-link {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 13px;
+  border-radius: var(--radius-sm);
+  font-family: var(--display);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.005em;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color var(--t), background var(--t);
+}
+/* Mobile-only dropdown view switcher; hidden on desktop (strip shows instead) */
+.pageselect { display: none; }
+
+.main-nav-link:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+[data-theme="light"] .main-nav-link:hover { background: rgba(0,0,0,0.04); }
+.main-nav-link.is-active { color: var(--accent-bright); }
+[data-theme="light"] .main-nav-link.is-active { color: var(--accent); }
+.main-nav-link.is-active::after {
+  content: '';
+  position: absolute;
+  left: 13px; right: 13px; bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-bright));
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+
+
+/* ── Mobile page selector (in-masthead dropdown) ──────────────────────────────
+   Phones replace the desktop tab strip with a compact gold pill that shows the
+   current view; tapping opens a portaled, brand-styled menu. `.pageselect` is
+   display:none on desktop (set above) → the button never shows and the menu
+   can't open there, so the button/menu styles below stay breakpoint-agnostic. */
+.pageselect { position: relative; align-items: center; flex: 0 0 auto; margin-left: 12px; }
+.pageselect-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 46vw;
+  padding: 6px 10px 6px 13px;
+  border: 1px solid var(--accent-ring);
+  border-radius: 100px;
+  background: var(--accent-dim);
+  color: var(--accent-bright);
+  font-family: var(--display);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--t), background var(--t), border-color var(--t);
+}
+[data-theme="light"] .pageselect-btn { color: var(--accent); }
+.pageselect-btn:hover,
+.pageselect-btn.is-open { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.pageselect-label { overflow: hidden; text-overflow: ellipsis; }
+.pageselect-caret { display: flex; color: var(--accent); transition: transform var(--t); }
+.pageselect-caret.up { transform: rotate(180deg); }
+
+.pageselect-backdrop { position: fixed; inset: 0; z-index: 230; background: rgba(0,0,0,0.4); }
+.pageselect-menu {
+  position: fixed;
+  z-index: 231;
+  min-width: 188px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border: 1px solid var(--accent-ring);
+  border-radius: var(--radius);
+  box-shadow: var(--glow-accent, 0 0 1px rgba(212,175,55,0.4)), 0 20px 50px rgba(0,0,0,0.45);
+  animation: nav-dd-in 0.14s cubic-bezier(0.25,0,0,1);
+}
+.pageselect-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+  border-radius: var(--radius-sm);
+  font-family: var(--display);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-decoration: none;
+  transition: color var(--t), background var(--t);
+}
+.pageselect-item:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+[data-theme="light"] .pageselect-item:hover { background: rgba(0,0,0,0.05); }
+.pageselect-item.is-active { color: var(--accent-bright); background: var(--accent-dim); }
+[data-theme="light"] .pageselect-item.is-active { color: var(--accent); }
+.pageselect-tick { font-size: 11px; color: var(--accent); }
+
+
+/* ── Date navigator ──────────────────────────────────────────────────────── */
+.datenav {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.datenav-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color var(--t), background var(--t), border-color var(--t), transform var(--t);
+}
+.datenav-step:hover {
+  color: var(--accent-bright);
+  background: var(--accent-dim);
+  border-color: var(--accent-ring);
+}
+.datenav-step:active { transform: scale(0.9); }
+.datenav-step.is-disabled {
+  opacity: 0.3;
+  pointer-events: none;
+}
+.datenav-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  cursor: pointer;
+  transition: border-color var(--t), background var(--t);
+}
+.datenav-label:hover { border-color: var(--border-3); background: var(--surface-3); }
+.datenav-label.is-open { border-color: var(--accent-ring); background: var(--accent-dim); }
+.datenav-cal-icon { color: var(--accent); align-self: center; display: flex; }
+.datenav-wd {
+  font-family: var(--display);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+.datenav-sep { color: var(--accent); font-size: 11px; }
+.datenav-full {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.datenav-caret { font-size: 8px; color: var(--text-4); align-self: center; transition: transform var(--t); }
+.datenav-caret.up { transform: rotate(180deg); color: var(--accent); }
+
+/* The Weekly stepper reuses .datenav with <button> steps (Daily uses <a>). */
+button.datenav-step,
+button.datenav-label { appearance: none; -webkit-appearance: none; font: inherit; }
+
+/* ── Week picker dropdown (Weekly header) — sibling of .datenav-cal ────────── */
+.weeknav-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 36px;
+  z-index: 40;
+  width: 268px;
+  max-height: 62vh;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border: 1px solid var(--accent-ring);
+  border-radius: var(--radius);
+  box-shadow: var(--glow-accent), 0 18px 44px rgba(0,0,0,0.45);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-2) transparent;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .weeknav-menu { animation: nav-dd-in 0.14s cubic-bezier(0.25,0,0,1); }
+}
+.weeknav-opt {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--text-2);
+  transition: background var(--t), border-color var(--t), color var(--t);
+}
+.weeknav-opt:hover { background: var(--surface-3); color: var(--text); }
+.weeknav-opt.is-active {
+  background: var(--accent-dim);
+  border-color: var(--accent-ring);
+  color: var(--text);
+}
+.weeknav-opt-glyph {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+}
+.weeknav-opt-range {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.weeknav-opt.is-active .weeknav-opt-range { color: var(--accent-bright); }
+.weeknav-opt-tag {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-ring);
+  border-radius: 100px;
+  padding: 1px 6px;
+}
+
+.datenav-cal {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 36px;
+  z-index: 40;
+  width: 256px;
+  padding: 10px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border: 1px solid var(--accent-ring);
+  border-radius: var(--radius);
+  box-shadow: var(--glow-accent), 0 18px 44px rgba(0,0,0,0.45);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .datenav-cal { animation: nav-dd-in 0.14s cubic-bezier(0.25,0,0,1); }
+}
+.datenav-cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.datenav-cal-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.datenav-cal-nav {
+  width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color var(--t), background var(--t), border-color var(--t);
+}
+.datenav-cal-nav:hover { color: var(--accent-bright); background: var(--accent-dim); border-color: var(--accent-ring); }
+.datenav-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.datenav-cal-gh {
+  font-family: var(--mono);
+  font-size: 8px;
+  color: var(--text-4);
+  text-align: center;
+  padding: 2px 0 4px;
+}
+.datenav-cal-cell {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 30px;
+  border-radius: 6px;
+  gap: 2px;
+}
+.datenav-cal-n {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-4);
+  line-height: 1;
+}
+.datenav-cal-cell.dim .datenav-cal-n { opacity: 0.4; }
+.datenav-cal-cell.future .datenav-cal-n { opacity: 0.3; }
+.datenav-cal-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: 0.8; }
+a.datenav-cal-cell.has { cursor: pointer; text-decoration: none; transition: background var(--t); }
+a.datenav-cal-cell.has .datenav-cal-n { color: var(--text); font-weight: 500; }
+a.datenav-cal-cell.has:hover { background: var(--surface-3); }
+a.datenav-cal-cell.has:hover .datenav-cal-n { color: var(--accent-bright); }
+.datenav-cal-cell.today { box-shadow: inset 0 0 0 1px var(--border-3); }
+a.datenav-cal-cell.on, a.datenav-cal-cell.on:hover { background: var(--accent); }
+a.datenav-cal-cell.on .datenav-cal-n { color: #000; font-weight: 600; }
+a.datenav-cal-cell.on .datenav-cal-dot { background: rgba(0,0,0,0.55); }
+
+
+/* ── Source filter chips ─────────────────────────────────────────────────── */
+.srcfilter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.srcfilter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 100px;
+  background: transparent;
+  border: 1px solid var(--border-2);
+  color: var(--text-3);
+  font-family: var(--display);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: color var(--t), background var(--t), border-color var(--t);
+}
+.srcfilter-chip:hover:not(:disabled) { color: var(--text); border-color: var(--border-3); }
+.srcfilter-chip:disabled { opacity: 0.35; cursor: not-allowed; }
+.srcfilter-chip.is-active {
+  color: var(--accent-bright);
+  background: var(--accent-dim);
+  border-color: var(--accent-ring);
+}
+[data-theme="light"] .srcfilter-chip.is-active { color: var(--accent); }
+/* Still used by the Entity Map type filter (EntityGraph), which keeps its All chip. */
+.srcfilter-all.is-active {
+  color: var(--text);
+  background: var(--surface-4);
+  border-color: var(--border-3);
+}
+/* Reset chip — appears only when a source is deselected; clears back to "all". */
+.srcfilter-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: 100px;
+  background: transparent;
+  color: var(--text-4);
+  font-family: var(--display);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--t), border-color var(--t);
+}
+.srcfilter-reset:hover { color: var(--accent); border-color: var(--accent-ring); }
+.srcfilter-reset-ic { font-size: 12px; line-height: 1; }
+.srcfilter-ic { display: flex; opacity: 0.85; }
+.srcfilter-n {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-4);
+  margin-left: 1px;
+}
+.srcfilter-chip.is-active .srcfilter-n { color: var(--accent); }
+
+/* ── Filter menu (source filtering, demoted to a masthead button + sheet) ──── */
+.filter-menu { position: relative; flex: 0 0 auto; display: flex; }
+.filter-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px;
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  background: var(--surface-3);
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--t), border-color var(--t), background var(--t);
+}
+.filter-btn:hover { color: var(--text); border-color: var(--border-3); }
+.filter-btn.is-open,
+.filter-btn.is-filtered {
+  color: var(--accent);
+  border-color: var(--accent-ring);
+  background: var(--accent-dim);
+}
+.filter-btn-ic { display: flex; }
+.filter-btn-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+/* Overlay is portaled to <body>. Base styling = mobile bottom sheet; the
+   desktop dropdown adds .is-anchored and positions via inline top/right. */
+.filter-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 220;
+  background: rgba(0, 0, 0, 0.45);
+}
+.filter-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 221;
+  padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 16px 16px 0 0;
+  background: var(--surface-2);
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.4);
+}
+.filter-sheet.is-anchored {
+  left: auto;
+  bottom: auto;
+  width: 260px;
+  padding: 12px;
+  border: 1px solid var(--border-2);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+.filter-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.filter-sheet-title {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.filter-sheet-close {
+  border: none;
+  background: transparent;
+  color: var(--text-4);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+.filter-sheet-close:hover { color: var(--accent); }
+.filter-sheet .srcfilter { gap: 8px; }
+.filter-sheet .srcfilter-chip { padding: 7px 12px; font-size: 12px; }
+
+@media (min-width: 901px) {
+  .filter-backdrop { background: transparent; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .filter-sheet { animation: sheet-up 0.2s cubic-bezier(0.25, 0, 0, 1); }
+  .filter-sheet.is-anchored { animation: nav-dd-in 0.14s cubic-bezier(0.25, 0, 0, 1); }
+  @keyframes sheet-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
+}
+
+
+/* ── Responsive nav / masthead ───────────────────────────────────────────── */
+@media (min-width: 541px) and (max-width: 980px) {
+  .main-nav { margin-left: 12px; }
+  .main-nav-link { padding: 7px 9px; font-size: 12px; }
+}
+
+@media (max-width: 540px) {
+  /* Single-row masthead: brand · page selector · search · theme. The view
+     switcher lives inside this row now (a compact dropdown), so there's no
+     longer a second fixed nav band — --h-header is just the masthead height. */
+  :root { --h-header: 50px; }
+
+  .header { flex-wrap: nowrap; padding: 0 12px; height: var(--h-header); gap: 0; }
+
+  .brand { flex: 0 0 auto; height: var(--h-header); align-items: center; }
+  .brand-text { display: flex; }
+  .brand-icon { width: 28px; height: 28px; }
+  .brand-name { font-size: 13px; letter-spacing: 0.18em; }
+  .brand-sub { display: none; }
+
+  /* Search icon — pushes right-side controls to the far right */
+  .nav-search-center { flex: none; position: static; margin-left: auto; height: 50px; padding: 0; pointer-events: auto; display: flex; align-items: center; }
+  .header-right { margin-left: 8px; height: 50px; flex-shrink: 0; align-items: center; }
+  .nav-search { display: none !important; }
+  .mobile-search-btn { display: flex; }
+
+  /* ── View-switcher (mobile) ────────────────────────────────────────────── */
+  /* The desktop tab strip is replaced by a compact in-masthead dropdown
+     (.pageselect) — styled globally above, just revealed here. */
+  .main-nav { display: none; }
+  .pageselect { display: flex; }
+
+  /* Masthead: DateNav (left) · Sort + Filter (right); weekday + signals hidden to save space */
+  .feed-head-top { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; }
+  .datenav { flex: 0 0 auto; }
+  .feed-head-meta { display: none; }
+  .sort-toggle { flex: 0 0 auto; margin-left: auto; }
+  .filter-menu { flex: 0 0 auto; }
+  .datenav-wd { display: none; }
+  .datenav-sep { display: none; }
+  .datenav-full { font-size: 11px; }
+  .view-title { font-size: 18px; }
+  .board-card-title { font-size: 15.5px; }
+}
+
+@media (pointer: coarse) {
+  .entity-tag     { padding: 5px 9px 5px 7px; font-size: 11px; gap: 5px; }
+  .entity-logo    { width: 14px; height: 14px; }
+  .entity-mono    { font-size: 7px; }
+  .bullet-cat     { padding: 3px 0; font-size: 9.5px; }
+  .srcfilter-chip { padding-top: 7px; padding-bottom: 7px; }
+  .datenav-step   { min-width: 38px; min-height: 38px; }
+  .main-nav-link  { padding-top: 9px; padding-bottom: 9px; }
+  .nv-toggle-link { padding-top: 8px; padding-bottom: 8px; }
+  .panel-close    { width: 36px; height: 36px; }
+}
+
+
+/* ── Header shell ────────────────────────────────────────────────────────── */
+.header {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: var(--h-header);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 16px 0 24px;
+  background: var(--header-bg);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border-bottom: 1px solid var(--border);
+  transition: background var(--t-slow), border-color var(--t-slow);
+}
+
+.header::after {
+  content: '';
+  position: absolute;
+  bottom: -1px; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(212,175,55,0.6) 20%,
+    rgba(232,200,74,0.9) 50%,
+    rgba(212,175,55,0.6) 80%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.brand-icon {
+  width: 46px;
+  height: 46px;
+  flex-shrink: 0;
+}
+.brand-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1;
+}
+
+.brand-name {
+  font-family: "Raleway", sans-serif;
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: 0.26em;
+  color: var(--accent);
+  line-height: 1;
+  text-transform: uppercase;
+}
+[data-theme="light"] .brand-name { color: var(--accent); }
+
+.brand-sub {
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 400;
+  color: var(--text-3);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+
+@media (max-width: 768px) {
+  .brand-icon { width: 38px; height: 38px; }
+  .brand-name { font-size: 16px; letter-spacing: 0.22em; }
+}
+
+@media (max-width: 540px) {
+  .brand-icon { width: 28px; height: 28px; }
+  .brand-name { font-size: 13px; letter-spacing: 0.18em; }
+
+  /* Override the pointer:coarse inflation so mobile stays compact */
+  /* Day-stepping arrows shown on phones (like desktop) — kept compact so they
+     fit the masthead; a left/right swipe on the feed also steps days. */
+  .datenav         { gap: 4px; }
+  .datenav-step    { width: 30px; height: 30px; min-width: 30px; min-height: 30px; }
+  .srcfilter-chip  { padding-top: 4px; padding-bottom: 4px; }
+  .sort-toggle-btn { padding: 2px 7px; font-size: 8.5px; }
+  .filter-btn-label { display: none; }            /* funnel icon + dot is enough on phones */
+  .filter-btn      { padding: 5px 9px; }
+}
+
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  border: 1px solid var(--border-2);
+  cursor: pointer;
+  color: var(--text-3);
+  transition: color var(--t), background var(--t), border-color var(--t);
+  flex-shrink: 0;
+}
+.theme-toggle:hover {
+  background: var(--surface-4);
+  border-color: var(--border-3);
+  color: var(--text);
+}
+.theme-toggle:active { transform: scale(0.92); }

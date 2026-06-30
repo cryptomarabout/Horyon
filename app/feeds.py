@@ -11,7 +11,8 @@ SOURCES: list[str] = [
     "https://nitter.net/sassal0x/rss",
     "https://nitter.net/l2beat/rss",
     "https://nitter.net/growthepie_eth/rss",
-
+    "https://nitter.net/routescan_io/rss",
+    "https://nitter.net/etherscan/rss",
     # Analytics / Data / On-Chain Intelligence
     "https://nitter.net/DefiLlama/rss",
     "https://nitter.net/tokenterminal/rss",
@@ -21,6 +22,7 @@ SOURCES: list[str] = [
     "https://nitter.net/glassnode/rss",
     "https://nitter.net/coingecko/rss",
     "https://nitter.net/coinmarketcap/rss",
+    "https://nitter.net/KaikoData/rss",
     "https://nitter.net/lookonchain/rss",
     "https://nitter.net/EmberCN/rss",
     "https://nitter.net/peckshield/rss",
@@ -64,6 +66,13 @@ SOURCES: list[str] = [
     "https://nitter.net/Uniswap/rss",
     "https://nitter.net/Morpho/rss",
     "https://nitter.net/ethena/rss",
+    "https://nitter.net/LidoFinance/rss",
+    "https://nitter.net/WrappedBTC/rss",
+    "https://nitter.net/jumperapp/rss",
+    "https://nitter.net/wormhole/rss",
+    "https://nitter.net/Lombard_Finance/rss",
+    "https://nitter.net/rainbowdotme/rss",
+    "https://nitter.net/lifiprotocol/rss",
 
     # Lending / Credit
     "https://nitter.net/SkyEcosystem/rss",
@@ -88,6 +97,7 @@ SOURCES: list[str] = [
     # Stablecoins / RWA
     "https://nitter.net/circle/rss",
     "https://nitter.net/OndoFinance/rss",
+    "https://nitter.net/tether/rss",
 
     # Infrastructure / Oracles
     "https://nitter.net/chainlink/rss",
@@ -105,6 +115,13 @@ SOURCES: list[str] = [
     "https://nitter.net/Delphi_Digital/rss",
     "https://nitter.net/dragonfly_xyz/rss",
     "https://nitter.net/VariantFund/rss",
+    "https://nitter.net/coinfund/rss",
+    "https://nitter.net/PanteraCapital/rss",
+    "https://nitter.net/glxyresearch/rss",
+    "https://nitter.net/brian_armstrong/rss",
+    "https://nitter.net/Kairos_Res/rss",
+    "https://nitter.net/paradigm/rss",
+    "https://nitter.net/Etherealize_io/rss",
 
     # News / Media
     "https://nitter.net/WuBlockchain/rss",
@@ -116,7 +133,10 @@ SOURCES: list[str] = [
     "https://decrypt.co/feed",
     "https://www.theblock.co/rss.xml",
     "https://blockworks.co/feed",
-    "https://cryptobriefing.com/feed",
+    # cryptobriefing.com removed 2026-06-19: its feed became a general-news/AI-slop
+    # aggregator (World Cup, geopolitics, SpaceX) reframed as "...crypto impact", which
+    # slips past any keyword filter. Was 26.8% of the corpus and polluted entity
+    # extraction / narratives / recent-mentions. Do NOT re-add without a relevance gate.
     "https://insights.glassnode.com/rss/",
     "https://www.bankless.com/feed",
     "https://cointelegraph.com/rss",
@@ -124,6 +144,7 @@ SOURCES: list[str] = [
     "https://cointelegraph.com/rss/tag/ethereum",
     "https://cointelegraph.com/rss/tag/defi",
     "https://cointelegraph.com/rss/tag/blockchain",
+    "https://www.chainalysis.com/blog/feed/",
 
     # Exchanges
     "https://nitter.net/coinbase/rss",
@@ -135,6 +156,15 @@ SOURCES: list[str] = [
     "https://nitter.net/DromosLabs/rss",
     "https://nitter.net/arc/rss",
     "https://nitter.net/aixbt_agent/rss",
+    "https://nitter.net/sui414/rss",
+    "https://nitter.net/cburniske/rss",
+    "https://nitter.net/SergeyNazarov/rss",
+    "https://nitter.net/haydenzadams/rss",
+    "https://nitter.net/cdixon/rss",
+    "https://nitter.net/RuneKek/rss",
+    "https://nitter.net/ASvanevik/rss",
+    "https://nitter.net/lawmaster/rss",
+    "https://nitter.net/fintechfrank/rss",
 ]
 
 FEED_NAMES: dict[str, str] = {
@@ -144,4 +174,8 @@ FEED_NAMES: dict[str, str] = {
     "rekt.news": "Rekt News",
     "weekinethereumnews.com": "Week In Ethereum",
     "blog.defillama.com": "DeFiLlama Blog",
+    "chainalysis.com": "Chainalysis",
+    # Kaiko has no RSS — app/kaiko.py scrapes its sitemaps and routes items through
+    # ingest.clean_items, which labels non-twitter links from this map.
+    "kaiko.com": "Kaiko",
 }

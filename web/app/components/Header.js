@@ -2,9 +2,7 @@ import Link from "next/link";
 import ThemeToggle from "./ThemeToggle";
 import NavSearch from "./NavSearch";
 import MainNav from "./MainNav";
-import GovernanceMenu from "./GovernanceMenu";
-
-export default function Header({ governance = [] }) {
+export default function Header() {
   return (
     <header className="header">
       <Link href="/" prefetch={false} className="brand" aria-label="Horyon home">
@@ -13,7 +11,7 @@ export default function Header({ governance = [] }) {
         </div>
         <div className="brand-text">
           <span className="brand-name">HORYON</span>
-          <span className="brand-sub">Crypto Intelligence Feed</span>
+          <span className="brand-sub">Crypto Market Intelligence</span>
         </div>
       </Link>
 
@@ -24,7 +22,6 @@ export default function Header({ governance = [] }) {
       </div>
 
       <div className="header-right">
-        <GovernanceMenu governance={governance} />
         <ThemeToggle />
       </div>
     </header>

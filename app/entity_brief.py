@@ -1,7 +1,8 @@
 """Entity Intel Briefs: pre-compute per-entity updates post-digest.
 
-Triggered once per day after the daily digest runs. For each entity that appears
-(word-boundary match) in that day's bullets, generates a brief using:
+Triggered once per day after the daily digest runs. For EVERY entity that appears
+(word-boundary match) in that day's bullets — no mention-count floor — generates a
+brief using:
   - Today's digest bullets mentioning the entity
   - Historical digest bullets (last 14 days)
   - Recent feed items (semantic search, last 14 days)
@@ -77,8 +78,14 @@ def _parse_bullets(html: str) -> list[dict]:
 
 
 def _find_entities_in_text(plain_text: str) -> list[dict]:
-    """Return entity_memory rows (with mention_count >= 3) that appear word-boundary in text."""
-    all_entities = db.get_entities_for_briefing(min_mentions=3)
+    """Return every entity_memory row that appears word-boundary in text.
+
+    No mention-count floor: the public web serves these briefs as the ONLY answer for
+    an entity-tag click (the live-LLM fallback was removed), so coverage must equal the
+    set of entities that can appear as a clickable tag — i.e. anything mentioned in a
+    bullet, even on its first appearance.
+    """
+    all_entities = db.get_entities_for_briefing(min_mentions=1)
     found: list[dict] = []
     seen: set[str] = set()
     for slug, name, type_, aliases in all_entities:
@@ -111,6 +118,47 @@ def _get_historical_bullets_for_entity(entity_name: str, days: int = 14) -> list
     return matching
 
 
+def _fmt_usd(v: float) -> str:
+    if v >= 1e12:
+        return f"${v / 1e12:.2f}T"
+    if v >= 1e9:
+        return f"${v / 1e9:.1f}B"
+    if v >= 1e6:
+        return f"${v / 1e6:.0f}M"
+    return f"${v:,.0f}"
+
+
+def _entity_db_facts(slug: str, name: str) -> str:
+    """Live DeFiLlama TVL + Snapshot governance for one entity, as a labeled context block —
+    the same verified grounding the per-bullet analyst gets, which the brief lacked. Returns
+    an empty string when no DB facts exist. Best-effort: failures degrade to no block."""
+    if not slug:
+        return ""
+    lines: list[str] = []
+    try:
+        prot = {p["slug"]: p for p in db.get_protocols_by_slugs([slug])}.get(slug)
+        if prot and prot.get("tvl_usd") is not None:
+            chg = prot.get("tvl_change_7d")
+            chg_str = f" ({chg:+.1f}% 7d)" if chg is not None else ""
+            cat = f" · {prot['category']}" if prot.get("category") else ""
+            lines.append(f" - {name}: TVL {_fmt_usd(float(prot['tvl_usd']))}{chg_str}{cat}")
+    except Exception:
+        log.debug("entity brief: TVL fetch failed for %r", name, exc_info=True)
+    try:
+        props = db.get_governance_for_entity(slug, name)
+        if props:
+            titles = ", ".join(f"'{p['title']}' ({p['state']})" for p in props)
+            lines.append(f" - Recent governance: {titles}")
+    except Exception:
+        log.debug("entity brief: governance fetch failed for %r", name, exc_info=True)
+    if not lines:
+        return ""
+    return (
+        "VERIFIED DATABASE FACTS (live DeFiLlama TVL + Snapshot governance — authoritative; "
+        "do NOT alter these numbers or invent others):\n" + "\n".join(lines)
+    )
+
+
 def _generate_brief(entity: dict, today_bullets: list[dict], digest_date: date_t) -> dict | None:
     """Generate brief HTML for one entity. Returns enriched entity dict or None on failure."""
     name = entity["name"]
@@ -134,7 +182,8 @@ def _generate_brief(entity: dict, today_bullets: list[dict], digest_date: date_t
             log.debug("entity brief: no data for %r, skipping", name)
             return None
 
-        user_prompt = prompts.build_entity_brief_user(name, all_bullets, list(feed_items))
+        db_facts = _entity_db_facts(entity.get("slug") or "", name)
+        user_prompt = prompts.build_entity_brief_user(name, all_bullets, list(feed_items), db_facts)
         # 900 tokens (was 600): a reasoning fallback model needs room to think AND still
         # emit the brief; with 600 it burned the budget reasoning and produced no bullets.
         content, model = llm.complete(prompts.ENTITY_BRIEF_SYSTEM, user_prompt, max_tokens=900, temperature=0.4)
@@ -183,3 +232,61 @@ def update_entity_briefs_from_digest(digest_date: date_t, bullets_html: str) -> 
 
     log.info("entity briefs: stored %d/%d briefs for %s", stored, len(entities), digest_date)
     return stored
+
+
+def backfill(days: int = 30) -> int:
+    """Generate a brief for every entity seen across the last N days of digests.
+
+    For coverage before the next digest cron runs. Each entity is generated EXACTLY ONCE,
+    from the MOST RECENT digest it appears in (newest→oldest walk, skip already-seen) —
+    `_generate_brief` pulls its own 14-day history, so the latest appearance yields the
+    freshest brief without redundant LLM calls.
+    """
+    from datetime import date as _date
+
+    rows = db.get_digest_contents_for_dedup(days=days)
+    rows = sorted(rows, key=lambda r: r[0], reverse=True)  # newest first
+
+    seen: set[str] = set()
+    stored = 0
+    for d, content in rows:
+        if not content:
+            continue
+        dd = d if isinstance(d, _date) else _date.fromisoformat(str(d)[:10])
+        plain = _TAG_RE.sub(" ", content)
+        today_bullets = _parse_bullets(content)
+        pending = [e for e in _find_entities_in_text(plain) if e["slug"] not in seen]
+        if not pending:
+            continue
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(_generate_brief, e, today_bullets, dd): e for e in pending}
+            for fut in as_completed(futures):
+                e = futures[fut]
+                seen.add(e["slug"])
+                try:
+                    result = fut.result()
+                    if result:
+                        db.upsert_entity_intel_brief(
+                            result["name"], result["brief_html"], result["model_used"], dd)
+                        stored += 1
+                except Exception:
+                    log.warning("entity brief: backfill upsert failed for %r", e.get("name"), exc_info=True)
+    log.info("entity briefs: backfill stored %d briefs (%d unique entities) across %d digests",
+             stored, len(seen), len(rows))
+    return stored
+
+
+if __name__ == "__main__":
+    import argparse
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    ap = argparse.ArgumentParser(description="Entity intel brief generation")
+    ap.add_argument("--backfill", action="store_true",
+                    help="regenerate briefs for every entity across recent digests")
+    ap.add_argument("--days", type=int, default=30, help="lookback window for --backfill")
+    args = ap.parse_args()
+
+    if args.backfill:
+        backfill(days=args.days)
+    else:
+        ap.error("nothing to do: pass --backfill (post-digest generation runs automatically)")

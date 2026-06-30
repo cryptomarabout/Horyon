@@ -1,0 +1,703 @@
+/* ── Audio briefing player ───────────────────────────────────────────────── */
+/* Docked at the bottom of .feed-left. Background distinguishes it from feed. */
+.audio-dock {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-2);
+  background: var(--surface-2);
+  padding: 10px 28px 12px;
+}
+@media (max-width: 900px) { .audio-dock { padding: 9px 20px 11px; } }
+@media (max-width: 640px) { .audio-dock { padding: 8px 14px 10px; } }
+
+/* ── Length-variant switcher — segmented control ─────────────────────────── */
+/* No label header — the pill content is self-describing */
+.audio-variants-wrap { margin-bottom: 6px; }
+.audio-variants {
+  display: flex;
+  gap: 0;
+  align-items: stretch;
+}
+.audio-variant {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 14px;
+  border: 1px solid var(--border-2);
+  border-right: none;
+  background: var(--surface-3);
+  color: var(--text-4);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  transition: color var(--t), background var(--t), border-color var(--t);
+}
+.audio-variant:first-child { border-radius: 7px 0 0 7px; }
+.audio-variant:last-child { border-right: 1px solid var(--border-2); border-radius: 0 7px 7px 0; }
+.audio-variant:hover { color: var(--text-2); background: var(--surface-4); }
+.audio-variant:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; z-index: 1; position: relative; }
+.audio-variant.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 700;
+}
+.audio-variant-name { text-transform: uppercase; letter-spacing: 0.06em; }
+.audio-variant-len {
+  font-size: 9px;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
+.audio-variant.active .audio-variant-len { opacity: 0.75; }
+
+/* ── Transport strip ─────────────────────────────────────────────────────── */
+.audio-player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+}
+
+/* ── Top bar (expanded) — variant switcher + collapse chevron on one line ──── */
+.audio-topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.audio-topbar .audio-variants-wrap { margin-bottom: 0; }
+.audio-collapse--top { margin-left: auto; flex: 0 0 auto; }
+
+/* Play/pause — always gold filled, clear visual hero */
+.audio-play {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  border: none;
+  background: var(--accent);
+  color: var(--bg);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  transition: background var(--t), box-shadow var(--t), transform var(--t);
+  box-shadow: 0 1px 6px var(--accent-ring);
+}
+.audio-play:hover {
+  background: var(--accent-bright);
+  box-shadow: 0 2px 12px rgba(212,175,55,0.4);
+  transform: scale(1.05);
+}
+.audio-play:active { transform: scale(0.96); }
+.audio-play:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* ±15s skip buttons — icon only, no label */
+.audio-skip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 7px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color var(--t), background var(--t);
+}
+.audio-skip:hover { color: var(--accent); background: var(--accent-dim); }
+.audio-skip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Chapter label */
+.audio-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 110px;
+}
+
+/* Progress track */
+.audio-track {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 36px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--border-2);
+  cursor: pointer;
+}
+.audio-track:not(.audio-track--wave)::before {
+  content: "";
+  position: absolute;
+  inset: -10px 0;
+}
+.audio-tick {
+  position: absolute;
+  top: -2px;
+  width: 2px;
+  height: 8px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--accent);
+  opacity: 0.4;
+  pointer-events: none;
+}
+.audio-fill {
+  position: relative;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+/* Playhead thumb — appears on track hover */
+.audio-fill::after {
+  content: "";
+  position: absolute;
+  right: -5px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.audio-track:not(.audio-track--wave):hover .audio-fill::after { opacity: 1; }
+.audio-hover-tip {
+  position: absolute;
+  bottom: 14px;
+  transform: translateX(-50%);
+  max-width: 220px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--surface-4);
+  border: 1px solid var(--border-2);
+  color: var(--text);
+  font-family: var(--display);
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  z-index: 5;
+}
+.audio-hover-time {
+  font-family: var(--mono);
+  color: var(--accent);
+  margin-right: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.audio-time {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Control cluster: [CH · TX · 1× · ↑] ────────────────────────────────── */
+.audio-ctrl-group {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+  margin-left: 2px;
+}
+.audio-ctrl-group button,
+.audio-tx-btn,
+.audio-chaps-btn,
+.audio-rate,
+.audio-collapse {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  line-height: 1;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 7px 11px;
+  min-height: 36px;
+  min-width: 36px;
+  background: transparent;
+  color: var(--text-4);
+  cursor: pointer;
+  transition: border-color var(--t), color var(--t), background var(--t);
+  white-space: nowrap;
+}
+.audio-ctrl-group button:hover,
+.audio-tx-btn:hover,
+.audio-chaps-btn:hover,
+.audio-rate:hover,
+.audio-collapse:hover {
+  color: var(--text-2);
+  border-color: var(--border-2);
+  background: var(--surface-4);
+}
+.audio-ctrl-group button:focus-visible,
+.audio-tx-btn:focus-visible,
+.audio-chaps-btn:focus-visible,
+.audio-rate:focus-visible,
+.audio-collapse:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.audio-tx-btn.on,
+.audio-chaps-btn.on {
+  color: var(--accent);
+  border-color: var(--accent-ring);
+  background: var(--accent-dim);
+}
+/* Icon-style buttons: chapters ≡ and transcript ⊟ need slightly larger glyphs */
+.audio-chaps-btn { font-size: 15px; padding: 4px 9px; }
+.audio-tx-btn    { font-size: 14px; padding: 4px 9px; }
+/* Collapse and dismiss buttons: SVG icon, no text — square-ish */
+.audio-collapse  { padding: 5px 9px; }
+
+.audio-wrap { display: flex; flex-direction: column; gap: 0; }
+.audio-chapters,
+.audio-transcript { margin-top: 6px; }
+
+/* ── Collapsed mini-player ───────────────────────────────────────────────── */
+.audio-collapsed {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.audio-collapsed-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+}
+.audio-collapsed-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-3);
+}
+.audio-collapsed-title {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.audio-collapsed-sep { color: var(--accent); }
+.audio-collapsed-time {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-4);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.audio-collapsed-caret {
+  display: flex;
+  align-items: center;
+  color: var(--text-4);
+  transition: color var(--t), transform var(--t);
+}
+.audio-collapsed-meta:hover .audio-collapsed-caret { color: var(--accent); }
+.audio-collapsed-prog { height: 3px; background: var(--border-2); }
+.audio-collapsed-prog-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.5s linear;
+}
+
+/* ── Chapter list ────────────────────────────────────────────────────────── */
+.audio-chapters {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.audio-chapter-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.audio-chapter {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 6px 8px 6px 10px;
+  border: none;
+  border-left: 3px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  transition: background var(--t), border-color var(--t), color var(--t);
+}
+.audio-chapter:hover { background: var(--surface-4); color: var(--text-2); }
+.audio-chapter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.audio-chapter.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: var(--accent-dim);
+}
+.audio-chapter-time {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-4);
+  font-variant-numeric: tabular-nums;
+  padding-top: 2px;
+  min-width: 28px;
+}
+.audio-chapter.active .audio-chapter-time { color: var(--accent); opacity: 0.85; }
+.audio-chapter-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.audio-chapter-title { line-height: 1.3; }
+.audio-chapter-entities { display: flex; flex-wrap: wrap; gap: 3px; }
+.audio-chapter-entity {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--surface-4);
+  color: var(--text-4);
+  white-space: nowrap;
+}
+.audio-chapter.active .audio-chapter-entity {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.audio-chapter-open {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-4);
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--t), border-color var(--t), color var(--t);
+  flex-shrink: 0;
+}
+.audio-chapter-row:hover .audio-chapter-open { opacity: 1; }
+.audio-chapter-open:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Mobile: tidy 2-row layout ───────────────────────────────────────────────
+   Row 1: transport (skip · play · skip) on the left, secondary cluster right.
+   Row 2: seek bar + elapsed/total. Kept compact — not a giant consumer player. */
+@media (max-width: 640px) {
+  .audio-player {
+    flex-wrap: wrap;
+    row-gap: 10px;
+    column-gap: 6px;
+    padding: 9px 12px;
+    align-items: center;
+  }
+  /* Secondary controls ride row 1, pushed to the right edge. */
+  .audio-ctrl-group { order: 10; margin-left: auto; padding-left: 0; border-left: none; }
+  /* Seek + time share row 2. */
+  .audio-track { order: 20; flex: 1 1 auto; min-width: 0; height: 7px; }
+  .audio-track--wave { height: 28px; }
+  .audio-time { order: 21; margin-left: 6px; flex: 0 0 auto; }
+  .audio-label { display: none; }
+  .audio-play { width: 40px; height: 40px; }
+  .audio-skip { min-width: 38px; min-height: 38px; }
+  .audio-ctrl-group button { min-height: 34px; min-width: 34px; }
+  /* Restore the briefing length on each variant ("~6 min") — even thirds.
+     The variant strip fills the row; the collapse chevron sits at its right. */
+  .audio-topbar .audio-variants-wrap { flex: 1 1 auto; min-width: 0; }
+  .audio-variants { width: 100%; }
+  .audio-variant { flex: 1 1 0; justify-content: center; padding: 6px 8px; font-size: 9.5px; }
+  .audio-variant-len { display: inline; }
+}
+
+/* ── Waveform ────────────────────────────────────────────────────────────── */
+.audio-track--wave {
+  height: 30px;
+  border-radius: 4px;
+  background: transparent;
+}
+.audio-waveform-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.audio-track--wave .audio-tick { display: none; }
+
+/* ── Transcript teleprompter ─────────────────────────────────────────────── */
+.audio-transcript {
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.audio-tx-status {
+  padding: 12px 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-4);
+}
+.audio-tx-status--err { color: var(--danger); }
+
+/* Chapter nav bar — only shown when script has ## section markers */
+.audio-tx-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-3);
+}
+.audio-tx-nav--hidden { display: none; }
+.audio-tx-nav-btn {
+  flex: 0 0 auto;
+  width: 26px; height: 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color var(--t), color var(--t);
+}
+.audio-tx-nav-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.audio-tx-nav-btn:disabled { opacity: 0.25; cursor: default; }
+.audio-tx-nav-loc {
+  flex: 1; min-width: 0;
+  display: flex; align-items: baseline; gap: 4px; overflow: hidden;
+}
+.audio-tx-nav-n, .audio-tx-nav-sep, .audio-tx-nav-total {
+  font-family: var(--mono); font-size: 10px; color: var(--text-4); flex-shrink: 0;
+}
+.audio-tx-nav-n { color: var(--text-2); font-weight: 600; }
+.audio-tx-nav-title {
+  font-family: var(--display); font-size: 11.5px; color: var(--text-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-left: 4px;
+}
+.audio-tx-live {
+  flex: 0 0 auto;
+  font-size: 9px;
+  color: var(--accent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .audio-tx-live { animation: tx-pulse 1.5s ease-in-out infinite; }
+}
+@keyframes tx-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+
+/* ── Subtitle view ───────────────────────────────────────────────────────── */
+/* Three-line sliding window: prev · current (highlighted) · next.
+   Active line: gold left bar + tinted background — the "next-gen" highlight. */
+.audio-subtitle {
+  padding: 8px 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+.audio-sub-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 10px 7px 14px;
+  border-radius: 5px;
+  border-left: 2.5px solid transparent;
+  min-height: 34px;
+  transition: opacity 0.3s ease, background 0.3s ease, border-color 0.3s ease;
+}
+/* Prev — ghosted context above */
+.audio-sub-line--prev {
+  opacity: 0.3;
+  font-size: 12.5px;
+  line-height: 1.52;
+  color: var(--text-3);
+}
+/* Current — the highlighted hero line */
+.audio-sub-line--curr {
+  opacity: 1;
+  font-size: 14.5px;
+  line-height: 1.58;
+  color: var(--text);
+  font-weight: 500;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border-left-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent) inset;
+}
+/* Idle (pre-play) — softer, no gold */
+.audio-sub-line--curr.audio-sub-line--idle {
+  color: var(--text-3);
+  font-size: 13px;
+  font-weight: 400;
+  background: transparent;
+  border-left-color: var(--border-2);
+  box-shadow: none;
+}
+/* Next — almost invisible preview */
+.audio-sub-line--next {
+  opacity: 0.18;
+  font-size: 12.5px;
+  line-height: 1.52;
+  color: var(--text-3);
+}
+/* Speaker badge — small pill chip */
+.audio-sub-speaker {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 7.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 5px;
+  border-radius: 3px;
+  margin-top: 3px;
+  white-space: nowrap;
+  transition: opacity 0.3s;
+}
+/* Host chip — gold outline */
+.audio-sub-speaker--host {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+}
+/* Expert chip — neutral */
+.audio-sub-speaker--expert {
+  color: var(--text-3);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+}
+.audio-sub-text { flex: 1 1 auto; font-family: var(--display); }
+/* "Press play" hint */
+.audio-sub-hint {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--text-4);
+  letter-spacing: 0.05em;
+  text-align: center;
+  padding: 6px 0;
+  width: 100%;
+}
+
+/* ── Persistent dock (when AudioPlayer is off-screen) ───────────────────── */
+.persist-dock {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  z-index: 120;
+  padding: 10px 24px 14px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  border-top: 1px solid var(--border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 -6px 32px rgba(0,0,0,0.28);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+@media (max-width: 900px) { .persist-dock { padding: 9px 16px 12px; } }
+@media (max-width: 640px) { .persist-dock { padding: 8px 12px 10px; } }
+
+/* ── Podcast rows in daily feed ─────────────────────────────────────────── */
+.bullet-sev--pod { background: var(--c-eth); }
+.bullet--pod:hover::before { background: var(--c-eth); }
+.bullet--pod.bullet--selected::before { background: var(--c-eth); }
+
+.bullet-pod-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--c-eth);
+  margin-bottom: 3px;
+}
+.bullet-pod-mic { display: flex; }
+.bullet-pod-sent {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 6px;
+  border-radius: 100px;
+  border: 1px solid var(--border);
+}
+.bullet-pod-sent--bull { color: var(--success); border-color: var(--success-ring); }
+.bullet-pod-sent--bear { color: var(--danger);  border-color: var(--danger-ring); }
+.bullet-pod-sent--neut { color: var(--text-3); }
+.bullet-pod-sent--mix  { color: var(--amber);   border-color: var(--amber-dim); }
+
+.pod-sent-ring {
+  width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--surface-3);
+  border: 1px solid var(--border-2);
+}
+.pod-sent-ring--bull { color: var(--success); }
+.pod-sent-ring--bear { color: var(--danger); }
+.pod-sent-ring--neut { color: var(--text-3); }
+.pod-sent-ring--mix  { color: var(--amber); }

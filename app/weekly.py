@@ -13,6 +13,7 @@ Entry points:
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -47,6 +48,68 @@ def _extract_rotation(raw: str) -> str:
 
 def _strip_rotation_line(raw: str) -> str:
     return re.sub(r"(?im)^ROTATION:\s*(BTC|ETH|ALT|MIXED)\s*\n?", "", raw, count=1)
+
+
+_SECTION_BULLET_RE = re.compile(r"^\s*•", re.M)
+
+
+def _build_market_snapshot(ctx: dict) -> str | None:
+    """Structured market levels for the Weekly web view's Market Snapshot block.
+
+    Derived from the same live data fed to the prompt (fetch_market_data →
+    {"top50":[…], "global":{…}}), so it never costs an extra call. Returns a JSON
+    string (or None when live data is unavailable, e.g. historical backfill). The
+    web reads this column-first and falls back to parsing the prose when absent.
+    """
+    market = ctx.get("market") or {}
+    g = market.get("global") or {}
+    top = {(c.get("symbol") or "").upper(): c for c in (market.get("top50") or [])}
+    btc_row = top.get("BTC") or {}
+    eth_row = top.get("ETH") or {}
+    btc = btc_row.get("price")
+    eth = eth_row.get("price")
+
+    snap = {
+        "btc_price": btc,
+        "btc_7d_pct": btc_row.get("change_7d"),
+        "eth_price": eth,
+        "eth_7d_pct": eth_row.get("change_7d"),
+        "eth_btc_ratio": (eth / btc) if (btc and eth) else None,
+        "btc_dominance": g.get("btc_dominance"),
+        "total_market_cap_usd": g.get("total_market_cap_usd"),
+        "market_cap_change_24h_pct": g.get("market_cap_change_24h_pct"),
+    }
+    snap = {k: v for k, v in snap.items() if v is not None}
+    return json.dumps(snap) if snap else None
+
+
+def validate_weekly_output(html: str) -> list[str]:
+    """Structural validation of a generated weekly digest.
+
+    Returns error strings with leading severity word (HIGH / MEDIUM).
+    Empty list = valid.  run_weekly() retries once on any HIGH error.
+    """
+    errors: list[str] = []
+    if not html or not html.strip():
+        errors.append("HIGH: weekly digest is empty")
+        return errors
+
+    # 📰 Key Stories must have at least one bullet
+    ks = re.search(r"📰[^\n]*Key Stories(.*?)(?=<b>⚡|$)", html, re.S | re.I)
+    if not ks or not _SECTION_BULLET_RE.search(ks.group(1)):
+        errors.append("HIGH: Key Stories section is empty or missing bullets")
+
+    # ⚡ What To Watch must have non-whitespace text
+    wtw = re.search(r"⚡[^\n]*What To Watch(.*?)$", html, re.S | re.I)
+    if not wtw or not wtw.group(1).strip():
+        errors.append("HIGH: What To Watch section is empty or missing")
+
+    # 🔥 Trending Dapps must have at least one bullet
+    td = re.search(r"🔥[^\n]*Trending Dapps(.*?)(?=<b>📰|$)", html, re.S | re.I)
+    if not td or not _SECTION_BULLET_RE.search(td.group(1)):
+        errors.append("MEDIUM: Trending Dapps section is empty or missing bullets")
+
+    return errors
 
 
 # --------------------------------------------------------------------------- #
@@ -142,6 +205,14 @@ def _build_context(
         log.warning("weekly: weekly chain failed", exc_info=True)
         ctx["weekly_chain"] = []
 
+    # ── Synthesized narratives (Research engine) — pre-clustered themes for the Trending
+    # section, so the weekly draws on already-clustered signal instead of re-deriving it. ──
+    try:
+        ctx["narratives"] = db.get_existing_narratives()
+    except Exception:
+        log.warning("weekly: narratives fetch failed", exc_info=True)
+        ctx["narratives"] = []
+
     return ctx
 
 
@@ -171,12 +242,34 @@ def run_weekly(
     try:
         ctx  = _build_context(week_start=week_start, week_end=week_end, historical=historical)
         user = prompts.build_weekly_user(ctx, week_start, week_end)
-        raw, model = llm.complete(prompts.WEEKLY_SYSTEM, user, max_tokens=1400, temperature=0.5)
-        duration_ms = int((time.monotonic() - t0) * 1000)
 
-        rotation  = _extract_rotation(raw)
-        body_raw  = _strip_rotation_line(raw)
-        body_html = sanitize(body_raw)
+        # Generate; validate; retry once on HIGH-severity failures.
+        rotation = "MIXED"
+        body_html = ""
+        model = ""
+        for attempt in range(2):
+            raw, model = llm.complete(prompts.WEEKLY_SYSTEM, user, max_tokens=1400, temperature=0.5)
+            rotation  = _extract_rotation(raw)
+            body_html = sanitize(_strip_rotation_line(raw))
+
+            errs = validate_weekly_output(body_html)
+            high_errs = [e for e in errs if e.startswith("HIGH")]
+            if errs:
+                log.warning(
+                    "weekly: validation errors (attempt %d/2): %s",
+                    attempt + 1, "; ".join(errs),
+                )
+            if not high_errs:
+                break
+            log.warning("weekly: retrying due to HIGH-severity validation failure")
+
+        if not body_html.strip():
+            raise ValueError("weekly digest produced empty output after retry")
+        high_errs = [e for e in validate_weekly_output(body_html) if e.startswith("HIGH")]
+        if high_errs:
+            raise ValueError(f"weekly digest failed validation after retry: {'; '.join(high_errs)}")
+
+        duration_ms = int((time.monotonic() - t0) * 1000)
         html = (
             f"📅 <b>Weekly Crypto Macro · "
             f"{week_start.strftime('%b %d')}–{week_end.strftime('%b %d, %Y')}</b>\n\n"
@@ -187,6 +280,7 @@ def run_weekly(
             week_start, week_end, html,
             rotation=rotation, model_used=model,
             trigger=trigger, duration_ms=duration_ms,
+            market_snapshot=_build_market_snapshot(ctx),
         )
         log.info(
             "weekly digest: done — %dms, rotation=%s, model=%s",

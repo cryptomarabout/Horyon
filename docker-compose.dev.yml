@@ -1,0 +1,59 @@
+# Development / test-machine overlay.
+#
+# Usage (from repo root):
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# What this changes vs. production:
+#   - No Caddy: all services are exposed directly on localhost ports.
+#   - Bot runs in POLLING mode (no public HTTPS URL / webhook required).
+#   - DB is accessible on localhost:5433 (same as prod for host-side tooling).
+#   - web exposed on :3000, monitor on :8090, bot on :8080.
+#   - HORYON_MONITOR_HASH / HORYON_THREADS_HASH are not required (Caddy is absent).
+#   - Monitor gets a "Database" panel to restore from / wipe to a backup:
+#       • ~/.horyon-db-backups is mounted read-only at /horyon-backups inside the container.
+#       • BACKUP_DIR=/horyon-backups tells config.py where to scan for dump parts.
+#       • The panel only appears when backups exist (run scripts/db-restore.sh --pull first).
+#
+# Prerequisites: fill in .env from .env.example. Minimum required:
+#   POSTGRES_PASSWORD, WEB_DB_PASSWORD, TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY
+# Optional (needed for data-switch panel to auto-pull backups):
+#   BACKUP_REPO, BACKUP_REPO_TOKEN
+# Other optional:
+#   NIM_API_KEY, CMC_API_KEY, TELEGRAM_ALLOWED_CHAT_IDS
+
+services:
+  bot:
+    environment:
+      - BOT_USE_POLLING=true
+      # Webhook vars become irrelevant in polling mode; set stubs so _check_env passes
+      # if these are not in your .env. Polling mode skips them in the required-var check.
+      - TELEGRAM_WEBHOOK_BASE=http://localhost:8080
+      - TELEGRAM_WEBHOOK_SECRET=dev
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  monitor:
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      - BOT_USE_POLLING=true
+      # Tell the monitor where the backup clone lives inside the container.
+      - BACKUP_DIR=/horyon-backups
+    volumes:
+      # Bind-mount the offsite backup clone (populated by scripts/db-restore.sh --pull)
+      # as read-only so the monitor UI can list available dumps without network access.
+      # The restore itself downloads the dump data from disk and streams it to horyon-db.
+      - "${HOME}/.horyon-db-backups:/horyon-backups:ro"
+
+  web:
+    ports:
+      - "127.0.0.1:3000:3000"
+    # Use the table-owner role in dev — no need to pre-provision horyon_web separately.
+    # Override DATABASE_URL to connect as crypto (full access).
+    environment:
+      - DATABASE_URL=postgresql://crypto:${POSTGRES_PASSWORD}@db:5432/crypto
+
+  # Caddy is excluded entirely in dev: no TLS, no routing needed.
+  caddy:
+    profiles:
+      - disabled

@@ -9,3 +9,6 @@ flask>=3.0
 docker>=7.0
 youtube-transcript-api>=0.6
 yt-dlp>=2024.1
+edge-tts>=6.1          # free TTS for the daily audio briefing (Microsoft neural voices)
+mutagen>=1.47          # pure-python audio duration probe (no ffmpeg)
+pytest-cov>=5.0        # coverage reporting for SonarQube

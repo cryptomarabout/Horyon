@@ -1,8 +1,9 @@
+import { unstable_cache } from "next/cache";
 import { searchProjectInfo, searchEntityMemory } from "./db";
 
 // Fetch project hints for every bullet at SSR time.
 // All DB queries run in parallel; chain API and price API each fire once.
-export async function buildProjectHints(bullets) {
+async function _buildProjectHints(bullets) {
   if (!bullets.length) return [];
 
   // One chain list call, cached 30 min by Next.js fetch cache
@@ -91,17 +92,22 @@ export async function buildProjectHints(bullets) {
         !defillamaSlugNorms.has(normalise(e.name))
       )
       .map(e => {
-        let logo = e.logo_url || null;
-        if (!logo && e.twitter_handle) {
-          // strip leading @ if present
-          const handle = e.twitter_handle.startsWith("@")
-            ? e.twitter_handle.slice(1)
-            : e.twitter_handle;
-          logo = `https://unavatar.io/twitter/${handle}`;
-        }
         const handle = e.twitter_handle?.startsWith("@")
           ? e.twitter_handle.slice(1)
           : e.twitter_handle;
+        // Avatar fallback chain — EntityAvatar walks it in order, then draws a monogram
+        // if every URL fails, so EVERY entity ends up with an image:
+        //   1. /api/avatar/<slug> — the bot-mirrored avatar served from our own DB, but
+        //      ONLY when entity_avatars actually has it (avatar_cached). app/avatars.py
+        //      resolves the Twitter pic server-side, so the browser NEVER hits unavatar.io
+        //      (preserves zero-egress + avoids unavatar's per-client rate-limit). Gating on
+        //      the flag avoids a guaranteed-404 request for not-yet-mirrored entities.
+        //   2. logo_url = COALESCE(DeFiLlama protocol logo, CoinGecko-seeded entity logo).
+        // Mirrors NarrativeView/NarrativePanel.
+        const avatars = [
+          e.avatar_cached ? `/api/avatar/${e.slug}` : null,
+          e.logo_url,
+        ].filter(Boolean);
         const url = handle
           ? `https://x.com/${handle}`
           : `https://defillama.com/protocol/${e.slug}`;
@@ -109,14 +115,23 @@ export async function buildProjectHints(bullets) {
           slug: e.slug,
           name: e.name,
           type: e.type,
-          logo,
+          avatars,
           url,
-          // signals to BulletItem that this entity has no DeFiLlama backing
-          isMemoryOnly: !e.logo_url && !e.twitter_handle,
           category: e.category || null,
         };
       });
 
     return { protocols, chains, entityTags };
   });
+}
+
+// Cache project hints per digest date — once a digest is published the bullets
+// don't change, so 1h TTL is safe and avoids the N*2 parallel DB queries on
+// every subsequent page load for the same date.
+export function buildProjectHints(date, bullets) {
+  return unstable_cache(
+    () => _buildProjectHints(bullets),
+    ["horyon-project-hints", date],
+    { revalidate: 3600 }
+  )();
 }

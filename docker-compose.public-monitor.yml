@@ -1,0 +1,22 @@
+# Publicly expose the monitor dashboard (test box only).
+#
+# The dev overlay binds monitor to 127.0.0.1:8090 (loopback-only). Stacking a
+# second `ports` entry would MERGE and leave both bindings fighting over host
+# port 8090, so we use the `!override` tag to REPLACE the list outright.
+#
+# Apply LAST, after the dev (+ external-db) overlays:
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.dev.yml \
+#                  -f docker-compose.external-db.yml \
+#                  -f docker-compose.public-monitor.yml up -d monitor
+#
+# REQUIRES MONITOR_AUTH_USER / MONITOR_AUTH_PASS in .env — the dashboard exposes
+# DB restore/wipe controls, so never publish it without the basic-auth gate set.
+# Also open an Azure NSG inbound rule for TCP 8090.
+services:
+  monitor:
+    ports: !override
+      - "0.0.0.0:8090:8090"
+    environment:
+      - MONITOR_AUTH_USER=${MONITOR_AUTH_USER}
+      - MONITOR_AUTH_PASS=${MONITOR_AUTH_PASS}

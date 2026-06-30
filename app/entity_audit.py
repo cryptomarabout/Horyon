@@ -3,9 +3,11 @@
 Commands:
   python -m app.entity_audit stats               — coverage stats on recent digest bullets
   python -m app.entity_audit merge               — merge duplicate entity_memory entries
+  python -m app.entity_audit dealias             — strip piggyback aliases (a big entity's ticker on small look-alikes)
   python -m app.entity_audit backfill-handles    — assign twitter_handle from co-occurring mentions
   python -m app.entity_audit reextract [--days N]— re-run LLM entity extraction on recent feed items
   python -m app.entity_audit seed-from-feeds     — seed entities from curated nitter feed sources
+  python -m app.entity_audit backfill-avatars    — fill logo_url/twitter_handle for curated entities the auto-seeds miss
   python -m app.entity_audit all                 — run all of the above in order
 """
 from __future__ import annotations
@@ -45,11 +47,21 @@ def _merge_key(name: str) -> str:
 
 
 # Curated cross-form equivalences the heuristic can't see (ticker / abbreviation
-# == project). Each set is folded into one node. Keep these verified + conservative.
+# == project, cross-TYPE same project, sub-brand == parent). Each set is folded into
+# ONE node regardless of type — bypasses the same-type guard, so keep them verified +
+# conservative (only fold things that are genuinely the SAME entity, never a
+# parent/child of DIFFERENT scope like Coinbase ≠ Coinbase Ventures).
 _EXPLICIT_MERGES = [
     {"bsc", "bnb-chain"},
     {"aero", "aerodrome", "aerodrome-finance"},
     {"hyperliquid", "hype"},
+    {"ethereum", "ether"},          # 'Ether' (the asset) == Ethereum (junk extraction w/ wrong @ether_fi)
+    {"kelp-dao", "kelp"},           # KelpDAO (dao) == Kelp (protocol) — same project, split by type
+    {"zcash", "zec"},               # Zcash (protocol) == zec (chain facet) — same coin, split by type
+    # NB: Ondo's sub-brands (ondo-global-markets, ondo-yield-assets) are DISTINCT
+    # DeFiLlama protocols with their own real TVL — do NOT merge them. The "3 Ondo
+    # tags" problem is fixed by `dealias` instead (strip their piggyback bare 'ondo'
+    # alias so only Ondo Finance matches a bare "Ondo" headline).
 ]
 
 
@@ -270,6 +282,112 @@ def cmd_merge(dry_run: bool = False) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Strip piggyback aliases
+# --------------------------------------------------------------------------- #
+
+# Don't dealias unless the owner is clearly the one true holder of the token.
+_DEALIAS_OWNER_MIN_MC = 10   # owner must be at least this mentioned
+_DEALIAS_DOMINANCE = 3       # owner.mc must be ≥ this × the next-largest holder
+_DEALIAS_TOKEN_MAXLEN = 8    # only short single-token aliases (tickers / bare names)
+_DEALIAS_LOSER_MAX_MC = 10   # only strip from MINOR look-alikes — a well-mentioned entity
+                             # (e.g. bnb-chain mc52) keeps its ticker even if a bigger
+                             # neighbour (binance mc199) coincidentally carries the alias
+
+
+def cmd_dealias(dry_run: bool = False) -> None:
+    """Strip 'piggyback' aliases: a bare distinctive token (ticker / single-word name)
+    that is really the identity of a MUCH larger, distinct entity but got attached as
+    an alias to a smaller look-alike. The smaller entity then false-matches every
+    headline mentioning the big one's ticker.
+
+    Examples this kills:
+      • 'hype' lives on Hyperliquid (mc 418) AND on Hyperion DeFi / Hyperliquid HLP /
+        Hyperbeat (mc 1-2) → those tag every $HYPE story. Strip from the small ones.
+      • 'ondo' lives on Ondo Finance (mc 56) AND on Ondo Global Markets / Yield Assets
+        → tag every Ondo story. Strip from the small ones.
+
+    The web first-word dedup can't fold these (names differ: Hyperion vs Hyperliquid),
+    so the fix has to be at the alias level. Conservative: only strips a token when one
+    owner dominates (≥3× the next holder, mc ≥ 10), only from holders < owner.mc/3, and
+    never strips an entity's OWN name/slug (that's a same-name collision → merge/delete).
+    """
+    print("\n=== Stripping piggyback aliases ===\n")
+
+    with db._conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT slug, name, aliases, mention_count FROM entity_memory"
+        )
+        rows = cur.fetchall()
+
+    ents = [
+        {"slug": s, "name": n, "aliases": list(a or []), "mc": mc or 0}
+        for s, n, a, mc in rows
+    ]
+
+    # token (lowercased single-word alias) → list of holder entities
+    holders: dict[str, list[dict]] = defaultdict(list)
+    for e in ents:
+        seen = set()
+        for a in e["aliases"]:
+            al = (a or "").strip().lower()
+            # Only alphanumeric tickers / bare names can be headline-matched piggybacks.
+            # Excludes @handles, $cashtags, hyphenated slug-forms (cme-group, usd-coin)
+            # and dotted names — none of those appear verbatim in prose, so they never
+            # cause the false-tag this pass exists to fix.
+            if (not al or al in seen or not al.isalnum() or al.isdigit()
+                    or len(al) < 3 or len(al) > _DEALIAS_TOKEN_MAXLEN
+                    or al in entities.GENERIC_TERMS):
+                continue
+            seen.add(al)
+            holders[al].append(e)
+
+    strips: list[tuple[dict, str, dict]] = []  # (loser, token, owner)
+    for token, hs in holders.items():
+        if len(hs) < 2:
+            continue
+        hs_sorted = sorted(hs, key=lambda e: e["mc"], reverse=True)
+        owner = hs_sorted[0]
+        second_mc = hs_sorted[1]["mc"]
+        if owner["mc"] < _DEALIAS_OWNER_MIN_MC or owner["mc"] < _DEALIAS_DOMINANCE * max(second_mc, 1):
+            continue
+        cutoff = owner["mc"] / _DEALIAS_DOMINANCE
+        for loser in hs_sorted[1:]:
+            # Only strip from clearly-minor look-alikes (both far smaller than the owner
+            # AND below an absolute ceiling) so a substantial entity is never de-aliased.
+            if loser["mc"] >= cutoff or loser["mc"] > _DEALIAS_LOSER_MAX_MC:
+                continue
+            # Never strip an entity's OWN identity (slug / normalised name) — that's a
+            # same-name collision, not a piggyback (handle via merge/delete instead).
+            if token == _norm(loser["name"]) or token == _norm(loser["slug"]):
+                continue
+            # Don't orphan: the loser must keep at least one matchable alias.
+            remaining = [a for a in loser["aliases"] if a.strip().lower() != token]
+            if not any(entities.matchable_term(a) or " " in a for a in remaining):
+                continue
+            strips.append((loser, token, owner))
+
+    print(f"Found {len(strips)} piggyback aliases to strip")
+    stripped = 0
+    for loser, token, owner in strips:
+        if dry_run:
+            print(f"  WOULD STRIP {token!r} from {loser['slug']} ({loser['mc']}mc)"
+                  f" — owned by {owner['slug']} ({owner['mc']}mc)")
+            continue
+        with db._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE entity_memory SET aliases = array_remove(aliases, %s),"
+                " updated_at = now() WHERE slug = %s",
+                (token, loser["slug"]),
+            )
+        stripped += 1
+
+    if dry_run:
+        print("(dry_run — no changes made)")
+    else:
+        print(f"Stripped {stripped} piggyback aliases.")
+
+
+# --------------------------------------------------------------------------- #
 # Backfill twitter_handle from co-occurring feed mentions
 # --------------------------------------------------------------------------- #
 
@@ -295,16 +413,18 @@ def cmd_backfill_handles(dry_run: bool = False) -> None:
         assigned = 0
         for slug, name, aliases in entities_rows:
             name_lower = name.lower()
-            # Score each mention by frequency in items containing this entity name
+            # Score each mention by frequency in items containing this entity name.
+            # Word-boundary match (\y), not a raw substring, to avoid piggyback false
+            # positives (e.g. 'arb' matching inside 'arbitrum') when assigning handles.
             cur.execute("""
                 SELECT mention, count(*) AS freq
                 FROM feed_items fi, unnest(fi.mentions) AS mention
-                WHERE fi.content ILIKE '%%' || %s || '%%'
+                WHERE fi.content ~* %s
                   AND mention NOT IN ('@bitcoin','@ethereum','@defi','@crypto','@web3','@nft')
                 GROUP BY mention
                 ORDER BY freq DESC
                 LIMIT 5
-            """, (name,))
+            """, (r"\y" + re.escape(name) + r"\y",))
             candidates = cur.fetchall()
 
             best_handle = None
@@ -494,6 +614,90 @@ def cmd_seed_from_feeds(dry_run: bool = False) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Curated avatar backfill for high-visibility entities the auto-seeds miss
+# --------------------------------------------------------------------------- #
+
+# The entity map shows a logo when an entity has a logo_url (DeFiLlama/CoinGecko)
+# OR a twitter_handle (resolved to its X avatar via unavatar.io); otherwise it
+# falls back to a bare monogram, which is the eyesore visible on the map. The
+# CoinGecko auto-seed only fills logo_url when slug == gecko-id, so tokens whose
+# slug differs from their gecko-id (aster vs aster-2, usde vs ethena-usde, …)
+# never get a logo. Curate the gaps here: token logos from CoinGecko (the exact
+# token image — more accurate than the issuer's X avatar) and org/exchange X
+# handles for non-token entities. Ambiguous or no-good-source entities
+# (ef-protocol, spcx, orchard, x402, individuals) are intentionally left as
+# monograms — a wrong logo is worse than none. Slug → stable CoinGecko logo URL.
+_ENTITY_LOGO_SEEDS = {
+    "aster":  "https://coin-images.coingecko.com/coins/images/69040/large/_ASTER.png",
+    "usde":   "https://coin-images.coingecko.com/coins/images/33613/large/usde.png",
+    "pyusd":  "https://coin-images.coingecko.com/coins/images/31212/large/PYUSD_Token_Logo_2x.png",
+    "rlusd":  "https://coin-images.coingecko.com/coins/images/39651/large/RLUSD_200x200_%281%29.png",
+    "purr":   "https://coin-images.coingecko.com/coins/images/37125/large/PURR_CG.png",
+    "mythos": "https://coin-images.coingecko.com/coins/images/28045/large/Mythos_Logos_200x200.png",
+    "venice": "https://coin-images.coingecko.com/coins/images/54023/large/VVV_Token_Transparent.png",
+}
+# Slug → X handle (resolved to an avatar by unavatar.io at render time).
+_ENTITY_HANDLE_SEEDS = {
+    "debank":  "@DeBankDeFi",
+    "nobitex": "@nobitex",
+    "ice":     "@ICE_Markets",
+    "ibit":    "@iShares",
+}
+
+
+def cmd_backfill_avatars(dry_run: bool = False) -> None:
+    """Fill logo_url / twitter_handle for curated high-visibility entities that the
+    automatic CoinGecko/DeFiLlama seeds miss, so they show an avatar on the map.
+
+    Only fills when the field is currently NULL (never overwrites an existing logo
+    or handle) and only touches entities that already exist in entity_memory.
+    """
+    print("\n=== Backfilling avatars for curated entities ===\n")
+    logos = 0
+    handles = 0
+    with db._conn() as conn, conn.cursor() as cur:
+        for slug, logo_url in _ENTITY_LOGO_SEEDS.items():
+            cur.execute(
+                "SELECT logo_url FROM entity_memory WHERE slug = %s", (slug,))
+            row = cur.fetchone()
+            if row is None:
+                print(f"  SKIP {slug!r} — not in entity_memory")
+                continue
+            if row[0]:
+                continue  # already has a logo
+            if dry_run:
+                print(f"  WOULD SET {slug!r} logo_url → {logo_url}")
+            else:
+                cur.execute(
+                    "UPDATE entity_memory SET logo_url = %s, updated_at = now() "
+                    "WHERE slug = %s AND logo_url IS NULL",
+                    (logo_url, slug))
+                logos += 1
+        for slug, handle in _ENTITY_HANDLE_SEEDS.items():
+            cur.execute(
+                "SELECT twitter_handle FROM entity_memory WHERE slug = %s", (slug,))
+            row = cur.fetchone()
+            if row is None:
+                print(f"  SKIP {slug!r} — not in entity_memory")
+                continue
+            if row[0]:
+                continue  # already has a handle
+            if dry_run:
+                print(f"  WOULD SET {slug!r} twitter_handle → {handle}")
+            else:
+                cur.execute(
+                    "UPDATE entity_memory SET twitter_handle = %s, updated_at = now() "
+                    "WHERE slug = %s AND twitter_handle IS NULL",
+                    (handle, slug))
+                handles += 1
+
+    if dry_run:
+        print("(dry_run — no changes made)")
+    else:
+        print(f"Set {logos} logos and {handles} twitter handles.")
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -502,8 +706,8 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description="Entity memory audit and maintenance")
     ap.add_argument("command", choices=[
-        "stats", "merge", "backfill-handles", "reextract",
-        "seed-from-feeds", "seed-from-coingecko", "all",
+        "stats", "merge", "dealias", "backfill-handles", "reextract",
+        "seed-from-feeds", "seed-from-coingecko", "backfill-avatars", "all",
     ])
     ap.add_argument("--dry-run", action="store_true", help="Print what would be done without writing")
     ap.add_argument("--days", type=int, default=7, help="Days of history for reextract (default: 7)")
@@ -514,10 +718,14 @@ def main() -> None:
         cmd_stats()
     if cmd in ("merge", "all"):
         cmd_merge(dry_run=args.dry_run)
+    if cmd in ("dealias", "all"):
+        cmd_dealias(dry_run=args.dry_run)
     if cmd in ("backfill-handles", "all"):
         cmd_backfill_handles(dry_run=args.dry_run)
     if cmd in ("seed-from-feeds", "all"):
         cmd_seed_from_feeds(dry_run=args.dry_run)
+    if cmd in ("backfill-avatars", "all"):
+        cmd_backfill_avatars(dry_run=args.dry_run)
     if cmd in ("seed-from-coingecko",):
         from .defillama import fetch_and_seed_coingecko
         n = fetch_and_seed_coingecko()

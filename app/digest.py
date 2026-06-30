@@ -88,6 +88,33 @@ def _post_filter_duplicates(html: str, covered_bullets: list[dict]) -> tuple[str
     return "\n".join(out), removed
 
 
+def _saturated_entities(covered_bullets: list[dict], min_days: int = 3) -> list[str]:
+    """Display names of protocols covered on ≥ ``min_days`` distinct recent digest days.
+
+    Drives the prompt's OVER-COVERED PROTOCOLS block: the LLM applies a higher inclusion
+    bar to these so the daily feed stops stacking yet-another routine Aave/Morpho/Pendle
+    update. Best-effort: any failure returns [] (the digest still builds).
+    """
+    if not covered_bullets:
+        return []
+    try:
+        days_by_slug: dict[str, set] = {}
+        for b in covered_bullets:
+            title = b.get("title") or ""
+            for slug in entities.detect_entities_in_text(title):
+                days_by_slug.setdefault(slug, set()).add(b.get("date"))
+        hot = [slug for slug, days in days_by_slug.items() if len(days) >= min_days]
+        if not hot:
+            return []
+        names = {r["slug"]: r.get("name") or r["slug"] for r in db.get_entities_by_slugs(hot)}
+        # order by saturation (most-covered first)
+        hot.sort(key=lambda s: len(days_by_slug[s]), reverse=True)
+        return [names.get(s, s) for s in hot]
+    except Exception:
+        log.debug("could not compute saturated entities", exc_info=True)
+        return []
+
+
 def _build_dedup_context(
     digest_rows: list[tuple],
 ) -> tuple[set[str], list[dict]]:
@@ -140,21 +167,106 @@ def _is_cache_fresh(last_run, last_analysis: str) -> bool:
 
 _BULLET_LINE_RE = re.compile(r"^\s*•")
 
+# Within a bullet the ONLY legitimate em dash is the title/body separator
+# (`• <b>Title</b> — body`). Em/en dashes INSIDE the body are an AI "slop" tell
+# (e.g. "No VC discount—bought at market") that reads as garbled on the social
+# card + thread, so normalize them to commas — keeping a numeric range (3—5) as a
+# plain hyphen. Regular hyphens (on-chain, 4-year) and URL hyphens are untouched
+# (the classes below match only em/en dashes, never ASCII "-").
+_BODY_NUM_DASH = re.compile(r"(?<=\d)\s*[—–]\s*(?=\d)")
+_BODY_DASH = re.compile(r"\s*[—–]+\s*")
+_TITLE_END_RE = re.compile(r"</b>", re.I)
+_LEAD_SEP_RE = re.compile(r"\s*[—–-]+\s*")
+
+
+def _deslop_bullet_body(line: str) -> str:
+    """De-slop one bullet line: preserve `<b>Title</b> — ` then strip em/en dashes
+    out of the body prose. No-op on a line without a title (leaves it untouched)."""
+    m = _TITLE_END_RE.search(line)
+    if not m:
+        return line
+    head, tail = line[: m.end()], line[m.end():]
+    sep_m = _LEAD_SEP_RE.match(tail)          # the intentional title/body separator
+    sep = " — " if sep_m else ""
+    rest = tail[sep_m.end():] if sep_m else tail
+    rest = _BODY_NUM_DASH.sub("-", rest)
+    rest = _BODY_DASH.sub(", ", rest)
+    return f"{head}{sep}{rest}"
+
 
 def _keep_bullets_only(body: str) -> str:
-    """Keep only the • bullet lines — drops any preamble/recap/reasoning a weaker
-    fallback model may emit before the bullets (defensive against prompt echo)."""
-    return "\n".join(ln for ln in (body or "").split("\n") if _BULLET_LINE_RE.match(ln))
+    """Keep only the • bullet lines (drops any preamble/recap/reasoning a weaker
+    fallback model may emit before the bullets — defensive against prompt echo) AND
+    de-slop em dashes inside each bullet body, so NO digest-persist path ever stores
+    an AI-tell em dash that then leaks into the web/OG card/thread."""
+    return "\n".join(
+        _deslop_bullet_body(ln)
+        for ln in (body or "").split("\n")
+        if _BULLET_LINE_RE.match(ln)
+    )
 
 
 def _count_bullets(body: str) -> int:
     return sum(1 for ln in (body or "").split("\n") if _BULLET_LINE_RE.match(ln))
 
 
+# Patterns that indicate the LLM emitted placeholder or garbled output.
+_PLACEHOLDER_RE = re.compile(r"\bN/A\b|\[INSERT\]|\[YOUR\b|as of writing|I don't know", re.IGNORECASE)
+_RAW_MARKDOWN_RE = re.compile(r"\*\*")
+_BOILERPLATE_TITLE_RE = re.compile(
+    r"<b>[\w\s]+(newsletter|briefing|digest|update|roundup)\s*#?\d*</b>", re.IGNORECASE
+)
+
+
+def validate_digest_output(content: str) -> list[str]:
+    """Structural validation of a generated digest.
+
+    Returns a list of error strings.  Empty list = valid output.
+    Severity is encoded as the first word: HIGH / MEDIUM / LOW.
+    The build_digest() caller retries once on any HIGH error.
+    """
+    errors: list[str] = []
+    if not content or not content.strip():
+        errors.append("HIGH: digest is empty")
+        return errors
+
+    bullets = _parse_digest_bullets(content)
+    if len(bullets) < 5:
+        errors.append(f"HIGH: only {len(bullets)} parseable bullet(s) — expected ≥5")
+
+    if _PLACEHOLDER_RE.search(content):
+        errors.append("HIGH: placeholder or confession text found in output")
+
+    if _RAW_MARKDOWN_RE.search(content):
+        errors.append("MEDIUM: raw markdown '**' found — prompt echo or wrong format")
+
+    # Check for repeated bullet titles (dedup failure)
+    titles = [b["title"].lower().strip() for b in bullets if b.get("title")]
+    seen: set[str] = set()
+    for t in titles:
+        if t in seen:
+            errors.append(f"MEDIUM: duplicate bullet title: {t!r}")
+        seen.add(t)
+
+    # Flag boilerplate site-name titles leaking through
+    for b in bullets:
+        if b.get("title") and _BOILERPLATE_TITLE_RE.search(f"<b>{b['title']}</b>"):
+            errors.append(f"LOW: boilerplate-style bullet title: {b['title']!r}")
+
+    # Empty bullets (title present but no body content at all)
+    for b in bullets:
+        if b.get("title") and not (b.get("body") or "").strip():
+            errors.append(f"LOW: empty bullet body for title {b['title']!r}")
+
+    return errors
+
+
 def build_digest() -> tuple[str, str, str]:
     """Run the model. Returns (telegram_html, raw_analysis, model_used)."""
     last_run, last_analysis = db.get_cache()
     rows = db.get_recent_feed_items(config.DIGEST_WINDOW_HOURS, config.DIGEST_LIMIT)
+    log.info("digest: %d feed item(s) in pub_date window (last %dh)",
+             len(rows), config.DIGEST_WINDOW_HOURS)
     previous = last_analysis if _is_cache_fresh(last_run, last_analysis) else ""
 
     # Dedup: parse last 7 days of digests → cited URLs + covered bullet titles
@@ -219,10 +331,9 @@ def build_digest() -> tuple[str, str, str]:
         analyst_notes=notes_ctx,
         podcast_context=podcast_ctx,
         covered_bullets=covered_bullets,
+        saturated_entities=_saturated_entities(covered_bullets),
     )
-    # Generate; if the model returns 0 parseable bullets (a weak/garbled response),
-    # retry once before giving up so a transient bad generation never persists an
-    # empty digest. ``body`` is reduced to bullet lines only (anti prompt-echo).
+    # Generate; validate output structure; retry once on HIGH-severity failures.
     model = ""
     body = ""
     for attempt in range(2):
@@ -231,9 +342,17 @@ def build_digest() -> tuple[str, str, str]:
         body, n_removed = _post_filter_duplicates(body, covered_bullets)
         if n_removed:
             log.info("post-filter: removed %d duplicate bullet(s)", n_removed)
-        if _count_bullets(body) >= 1:
+
+        errs = validate_digest_output(body)
+        high_errs = [e for e in errs if e.startswith("HIGH")]
+        if errs:
+            sev = "HIGH" if high_errs else "MEDIUM/LOW"
+            log.warning("digest: validation %s errors (attempt %d/2): %s",
+                        sev, attempt + 1, "; ".join(errs))
+        if not high_errs:
             break
-        log.warning("digest: 0 parseable bullets (attempt %d/2) — retrying", attempt + 1)
+        log.warning("digest: retrying due to HIGH-severity validation failure")
+
     if _count_bullets(body) < 1:
         raise ValueError("digest produced no parseable bullets after retry")
     html = f"🧠 <b>Crypto Twitter Digest</b>\n\n{body}"
@@ -260,6 +379,7 @@ def orchestrate_post_digest(html: str, raw_digest: str, trigger: str) -> None:
     3. Entity intel briefs update
     4. Entity memory decay (inactive entities/pruning)
     5. Narrative layer rebuild (clusters + momentum)
+    6. Twitter/X thread rendering (one tweet per bullet + OG card) — consumes step 2's output
     """
     today = datetime.now(timezone.utc).date()
     log.info("Starting post-digest orchestration for %s (trigger=%s)...", today.isoformat(), trigger)
@@ -296,6 +416,31 @@ def orchestrate_post_digest(html: str, raw_digest: str, trigger: str) -> None:
         narratives.build_and_store()
     run_step("narrative rebuild", rebuild_narratives)
 
+    # Step 6: Twitter/X thread rendering (reads step 2's stored analyses + scores)
+    def build_thread():
+        from . import threads
+        threads.build_thread_for_date(today)
+    run_step("twitter thread render", build_thread)
+
+    # Step 6b: Pre-render + cache the /api/og social card (reads step 2's scores for ranking).
+    # Renders once here so the PUBLIC og route serves stored bytes instead of rendering per
+    # request — removes a compute-DoS vector on the public site (app/og_cache.py).
+    def cache_og():
+        from . import og_cache
+        og_cache.build_og_for_date(today)
+    run_step("og card cache", cache_og)
+
+    # Step 7: Audio briefings — all three length variants (short/standard/explainer) from one set
+    # of grounded signals; also consumes step 2's analyses. Last because it's the newest/most
+    # failure-prone surface and depends on nothing downstream; its own internal timeout + the
+    # run_step isolation keep it from delaying/breaking the digest. (Each variant fails closed on
+    # its own modality gate, so one blocked render never affects the others.)
+    if config.AUDIO_BRIEFING_ENABLED:
+        def build_briefing():
+            from . import briefing
+            briefing.build_all_variants_for_date(today)
+        run_step("audio briefing render (all variants)", build_briefing)
+
     log.info("Post-digest orchestration finished for %s.", today.isoformat())
 
 
@@ -328,6 +473,47 @@ def run_digest(trigger: str = "manual") -> str:
         raise
 
 
+# Related-coverage context for the per-bullet analyst (see _generate_one_analysis): how many
+# nearby feed items to inject as background, and the cosine-similarity floor below which a
+# search_feed hit is treated as too unrelated to be useful (ANN always returns topk, so a floor
+# is a coarse prefilter; the real relevance gate is the entity-name anchor in _related_coverage).
+_BULLET_CTX_MAX_ITEMS = 4
+_BULLET_CTX_MIN_SCORE = 0.35
+
+
+def _related_coverage(title: str, anchor_names: list[str], own_link: str = "") -> list[str]:
+    """Recent feed items that ACTUALLY name one of the bullet's entities — tight background
+    for the per-bullet analyst, not just topically-adjacent macro noise.
+
+    Vector-search-by-title alone returns adjacent-but-different items (a niche bullet pulls
+    generic BTC/macro coverage that clears the similarity floor), so the resolved entity names
+    are the real gate: a hit is kept only if it word-boundary-matches one. No anchor (entity
+    detection missed) → empty, which beats injecting scattered context. Fail-silent.
+    """
+    if not anchor_names:
+        return []
+    anchor_re = re.compile(r"\b(" + "|".join(re.escape(a) for a in set(anchor_names)) + r")\b", re.I)
+    own_link = (own_link or "").strip()
+    out: list[str] = []
+    try:
+        for r in db.search_feed(title, topk=8, days=14):
+            if len(out) >= _BULLET_CTX_MAX_ITEMS:
+                break
+            if float(r.get("score") or 0) < _BULLET_CTX_MIN_SCORE:
+                continue
+            if own_link and (r.get("link") or "").strip() == own_link:
+                continue
+            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", str(r.get("content") or ""))).strip()
+            if len(text) < 40 or not anchor_re.search(text):
+                continue
+            when = r.get("pub_date")
+            when = str(when.date()) if hasattr(when, "date") else "?"
+            out.append(f" - [{when}] {text[:280]}")
+    except Exception:
+        log.debug("bullet analysis: related-coverage lookup failed (non-fatal)", exc_info=True)
+    return out
+
+
 def _generate_one_analysis(bullet: dict) -> dict:
     """Call LLM for a single bullet. Returns the bullet dict enriched with analysis + model_used."""
     title = bullet["title"]
@@ -338,11 +524,25 @@ def _generate_one_analysis(bullet: dict) -> dict:
     # real DB rows (trustworthy), whereas entity_memory.summary is itself an earlier LLM
     # guess. Presenting the latter as "ground truth" would launder a past hallucination
     # into this prompt, so it is labeled as an unverified hint the model must not quote.
-    from . import entities
+    from . import entities, known_facts
     slugs = entities.detect_entities_in_text(f"{title} {body}")
+
+    # Highest-priority, human-curated ground truth (overrides source spin + prior LLM notes).
+    # Matched both on resolved entity slugs and on the raw bullet text (catches an entity the
+    # detector missed but the curated trigger term names — e.g. "Arc chain").
+    fact_lines = known_facts.facts_for_slugs(slugs)
+    for f in known_facts.facts_for_text(f"{title} {body}"):
+        if f not in fact_lines:
+            fact_lines.append(f)
+    # Generic safety net for an un-curated pre-launch entity (feeds the OG hero detail too).
+    from . import audit
+    for f in audit.prelaunch_warnings(f"{title} {body}"):
+        if f not in fact_lines:
+            fact_lines.append(f)
 
     verified_lines: list[str] = []
     note_lines: list[str] = []
+    anchor_names: list[str] = []  # entity display names → relevance gate for related coverage
     if slugs:
         entity_rows = db.get_entities_by_slugs(slugs)
         try:
@@ -362,6 +562,7 @@ def _generate_one_analysis(bullet: dict) -> dict:
         for ent in entity_rows:
             slug = ent["slug"]
             name = ent.get("name") or slug
+            anchor_names.append(name)
             summary = (ent.get("summary") or "").strip()
             tvl_info = tvl_map.get(slug)
             
@@ -389,12 +590,28 @@ def _generate_one_analysis(bullet: dict) -> dict:
             if summary:
                 note_lines.append(f" - {name}: {summary}")
 
+    # Related recent coverage: feed items that name one of this bullet's entities — real,
+    # citable background for "why it matters / what to watch" instead of leaning on model
+    # memory (which the grounding rules forbid). Anchored on the resolved entity names so a
+    # niche bullet gets tight background or none, never scattered macro noise.
+    related_lines = _related_coverage(title, anchor_names, bullet.get("link") or "")
+
     ctx_blocks: list[str] = []
+    if fact_lines:
+        from . import known_facts as _kf
+        ctx_blocks.append(_kf.block(fact_lines))
     if verified_lines:
         ctx_blocks.append(
             "VERIFIED DATABASE FACTS (live DeFiLlama TVL + Snapshot governance — use as "
             "background; do NOT alter these numbers or invent others):\n"
             + "\n".join(verified_lines)
+        )
+    if related_lines:
+        ctx_blocks.append(
+            "RELATED RECENT COVERAGE (other recent feed items near this story — background "
+            "context only; do NOT present them as part of today's event, do NOT quote their "
+            "numbers as this story's figures, and preserve their tense):\n"
+            + "\n".join(related_lines)
         )
     if note_lines:
         ctx_blocks.append(

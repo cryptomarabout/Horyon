@@ -1,0 +1,224 @@
+/* =============================================================================
+   Atlas › Entity Graph — the co-occurrence Board / Network views (`eg-*`).
+   Split out of maps.css (2026-06-26). Relies on the shared map chrome
+   (`.map-toolbar`, `.map-canvas`, `.map-svg`, `.map-zoomctl`, …) which still
+   lives in maps.css; both are imported globally in app/layout.js. The Atlas
+   Index table lives in entityLeague.css.
+   ============================================================================= */
+
+/* ── Entity Map — co-occurrence graph (colour = entity type) ─────────────── */
+.eg-weight {
+  display: inline-flex; gap: 2px; padding: 2px;
+  background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 100px;
+}
+.eg-weight-label {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-3); margin-right: 2px;
+}
+.eg-weight-btn {
+  padding: 4px 11px;
+  font-family: var(--mono); font-size: 10.5px;
+  color: var(--text-3);
+  background: transparent;
+  border: none;
+  border-radius: 100px;
+  cursor: pointer;
+  transition: color var(--t), background var(--t);
+}
+.eg-weight-btn:hover { color: var(--text); }
+.eg-weight-btn.is-active { color: var(--accent-bright); background: var(--accent-dim); }
+[data-theme="light"] .eg-weight-btn.is-active { color: var(--accent); }
+.eg-metric-btn:focus-visible,
+.eg-weight-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.eg-metric {
+  display: inline-flex; gap: 2px; padding: 2px;
+  background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 100px;
+}
+.eg-metric-btn {
+  padding: 4px 12px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.03em;
+  color: var(--text-3); background: transparent; border: none; border-radius: 100px; cursor: pointer;
+  transition: color var(--t), background var(--t);
+}
+.eg-metric-btn:hover { color: var(--text); }
+.eg-metric-btn.is-active { color: var(--bg); background: var(--accent); font-weight: 600; }
+[data-theme="light"] .eg-metric-btn.is-active { color: #fff; }
+
+.eg-view {
+  display: inline-flex; gap: 2px; padding: 2px; flex-shrink: 0;
+  background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 100px;
+}
+.eg-view-btn {
+  padding: 4px 13px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.03em;
+  color: var(--text-3); background: transparent; border: none; border-radius: 100px; cursor: pointer;
+  transition: color var(--t), background var(--t);
+}
+.eg-view-btn:hover { color: var(--text); }
+.eg-view-btn.is-active { color: var(--bg); background: var(--accent); font-weight: 600; }
+[data-theme="light"] .eg-view-btn.is-active { color: #fff; }
+.eg-view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.eg-aff-pill {
+  font-family: var(--mono); font-size: 10px; color: var(--accent);
+  background: var(--accent-dim); border: 1px solid var(--accent-ring);
+  border-radius: 100px; padding: 1px 8px; letter-spacing: 0.02em; white-space: nowrap;
+}
+
+.eg-evidence { display: flex; flex-direction: column; gap: 7px; }
+.eg-evi-row {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 9px 11px; border: 1px solid var(--border);
+  border-left: 2px solid var(--accent-ring);
+  border-radius: var(--radius-sm); background: var(--surface-2);
+  transition: background var(--t), border-color var(--t);
+}
+.eg-evi-row:hover { background: var(--surface-3); border-left-color: var(--accent); }
+.eg-evi-snippet {
+  font-size: 12px; line-height: 1.5; color: var(--text-2);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.eg-evi-meta {
+  display: flex; gap: 5px; font-family: var(--mono); font-size: 9px;
+  color: var(--text-4); text-transform: lowercase;
+}
+
+.egdot--protocol { background: var(--ty-protocol); color: var(--ty-protocol); }
+.egdot--chain    { background: var(--ty-chain);    color: var(--ty-chain); }
+.egdot--exchange { background: var(--ty-exchange); color: var(--ty-exchange); }
+.egdot--fund     { background: var(--ty-fund);     color: var(--ty-fund); }
+.egdot--dao      { background: var(--ty-dao);      color: var(--ty-dao); }
+.egdot--person   { background: var(--ty-person);   color: var(--ty-person); }
+.egdot--other    { background: var(--ty-other);    color: var(--ty-other); }
+
+.egfilter-chip--protocol.is-active { color: var(--ty-protocol); border-color: var(--ty-protocol); background: var(--ty-protocol-dim); }
+.egfilter-chip--chain.is-active    { color: var(--ty-chain);    border-color: var(--ty-chain);    background: var(--ty-chain-dim); }
+.egfilter-chip--exchange.is-active { color: var(--ty-exchange); border-color: var(--ty-exchange); background: var(--ty-exchange-dim); }
+.egfilter-chip--fund.is-active     { color: var(--ty-fund);     border-color: var(--ty-fund);     background: var(--ty-fund-dim); }
+.egfilter-chip--dao.is-active      { color: var(--ty-dao);      border-color: var(--ty-dao);      background: var(--ty-dao-dim); }
+.egfilter-chip--person.is-active   { color: var(--ty-person);   border-color: var(--ty-person);   background: var(--ty-person-dim); }
+.egfilter-chip--other.is-active    { color: var(--ty-other);    border-color: var(--ty-other);    background: var(--ty-other-dim); }
+.egfilter-chip.is-active .srcfilter-n { color: inherit; opacity: 0.75; }
+
+.map-node.ty-protocol { color: var(--ty-protocol); }
+.map-node.ty-chain    { color: var(--ty-chain); }
+.map-node.ty-exchange { color: var(--ty-exchange); }
+.map-node.ty-fund     { color: var(--ty-fund); }
+.map-node.ty-dao      { color: var(--ty-dao); }
+.map-node.ty-person   { color: var(--ty-person); }
+.map-node.ty-other    { color: var(--ty-other); }
+
+.map-node-circle {
+  fill: color-mix(in srgb, currentColor 13%, var(--map-node-bg));
+  fill-opacity: 1;
+  stroke: currentColor;
+  stroke-width: 1.75px;
+  stroke-opacity: 0.9;
+  transition: stroke-width var(--t), stroke var(--t), filter var(--t);
+}
+.map-node-mono { fill: currentColor; }
+.map-node-halo {
+  fill: currentColor;
+  opacity: 0.11;
+  pointer-events: none;
+  transition: opacity var(--t), fill var(--t);
+}
+
+.map-node.has-logo .map-node-circle { fill: var(--map-node-bg) !important; }
+
+.map-node:hover .map-node-circle { stroke: var(--accent-bright); stroke-width: 2.75px; }
+.map-node:hover .map-node-mono { fill: var(--accent-bright); }
+.map-node:hover .map-node-halo { fill: var(--accent-bright); opacity: 0.24; }
+[data-theme="light"] .map-node:hover .map-node-circle { stroke: var(--accent); }
+[data-theme="light"] .map-node:hover .map-node-mono { fill: var(--accent); }
+[data-theme="light"] .map-node:hover .map-node-halo { fill: var(--accent); }
+.map-node.is-focus .map-node-circle { stroke-width: 2.25px; stroke-opacity: 1; }
+.map-node.is-focus .map-node-halo { opacity: 0.18; }
+
+.map-node--narr .map-node-halo { fill: var(--accent); opacity: 0.2; }
+.map-node.is-selected .map-node-circle {
+  stroke: var(--accent); stroke-opacity: 1; stroke-width: 2.75px;
+  filter: drop-shadow(0 0 10px var(--accent-glow));
+}
+.map-node.is-selected .map-node-halo { fill: var(--accent); opacity: 0.3; }
+.map-node.is-selected .map-node-mono { fill: var(--accent-bright); }
+.map-node.is-selected .map-node-label { fill: var(--accent-bright); }
+[data-theme="light"] .map-node.is-selected .map-node-mono { fill: var(--accent); }
+[data-theme="light"] .map-node.is-selected .map-node-label { fill: var(--accent); }
+
+.map-avatar--lg { width: 38px; height: 38px; }
+.eg-avatar--protocol { border-color: var(--ty-protocol); background: var(--ty-protocol-dim); }
+.eg-avatar--chain    { border-color: var(--ty-chain);    background: var(--ty-chain-dim); }
+.eg-avatar--exchange { border-color: var(--ty-exchange); background: var(--ty-exchange-dim); }
+.eg-avatar--fund     { border-color: var(--ty-fund);     background: var(--ty-fund-dim); }
+.eg-avatar--dao      { border-color: var(--ty-dao);      background: var(--ty-dao-dim); }
+.eg-avatar--person   { border-color: var(--ty-person);   background: var(--ty-person-dim); }
+.eg-avatar--other    { border-color: var(--ty-other);    background: var(--ty-other-dim); }
+
+.eg-badge-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.eg-cat { font-family: var(--mono); font-size: 9.5px; color: var(--text-3); }
+.eg-badge--protocol { color: var(--ty-protocol); border-color: var(--ty-protocol); }
+.eg-badge--chain    { color: var(--ty-chain);    border-color: var(--ty-chain); }
+.eg-badge--exchange { color: var(--ty-exchange); border-color: var(--ty-exchange); }
+.eg-badge--fund     { color: var(--ty-fund);     border-color: var(--ty-fund); }
+.eg-badge--dao      { color: var(--ty-dao);      border-color: var(--ty-dao); }
+.eg-badge--person   { color: var(--ty-person);   border-color: var(--ty-person); }
+.eg-badge--other    { color: var(--ty-other);    border-color: var(--ty-other); }
+
+.eg-narr-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--mono); font-size: 9px; font-weight: 600;
+  letter-spacing: 0.05em; text-transform: uppercase;
+  padding: 1px 7px; border-radius: 100px;
+  border: 1px solid var(--accent-ring); color: var(--accent);
+  background: var(--accent-dim);
+}
+.eg-narr-pill--heating { color: var(--st-heating); border-color: var(--st-heating); background: var(--st-heating-dim); }
+.eg-narr-pill--forming { color: var(--st-forming); border-color: var(--st-forming); background: var(--st-forming-dim); }
+
+.eg-neighbors, .eg-endpoints { display: flex; flex-wrap: wrap; gap: 6px; }
+.eg-endpoints { gap: 8px; }
+.eg-neighbor {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 9px 4px 8px;
+  font-family: var(--display); font-size: 11px; font-weight: 500;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  cursor: pointer;
+  transition: color var(--t), border-color var(--t), background var(--t);
+}
+.eg-neighbor:hover { color: var(--text); border-color: var(--border-3); background: var(--surface-3); }
+.eg-neighbor-name { white-space: nowrap; max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
+.eg-neighbor-w {
+  font-family: var(--mono); font-size: 9px; color: var(--text-4);
+  font-variant-numeric: tabular-nums;
+  padding-left: 5px; border-left: 1px solid var(--border-2);
+}
+
+@media (max-width: 640px) {
+  .eg-weight { order: 2; }
+  .map-toolbar-right { flex-wrap: wrap; }
+}
+
+
+/* ── Detail-panel "Fundamentals" block (protocol nodes) ──────────────────── */
+.eg-funda {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  gap: 1px; background: var(--border-2); border: 1px solid var(--border-2); border-radius: 8px;
+  overflow: hidden;
+}
+.eg-funda-stat {
+  display: flex; flex-direction: column; gap: 3px; padding: 9px 11px; background: var(--surface-2);
+}
+.eg-funda-k {
+  font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-4);
+}
+.eg-funda-v {
+  font-family: var(--mono); font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums;
+}
+.eg-funda-chains {
+  margin: 8px 0 0; font-family: var(--mono); font-size: 10px; color: var(--text-4); line-height: 1.5;
+}
+

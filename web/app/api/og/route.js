@@ -1,33 +1,40 @@
 import { ImageResponse } from "next/og";
 import { readFile } from "fs/promises";
 import path from "path";
-import { getDigest, latestDate } from "../../../lib/db";
+import { getDigest, getBulletAnalyses, latestDate, getOgCard } from "../../../lib/db";
+import { isValidDigestDate } from "../../../lib/digest";
 
 export const dynamic = "force-dynamic";
 
-// ── Canvas ───────────────────────────────────────────────────────────────────
-const W = 1080;
-const H = 1080;
-const PAD = 40; // horizontal padding
+// Edge/browser cache for the card. The bot re-warms digest_og post-digest, so a 10-min TTL
+// is a fine ceiling on how long a regenerated card takes to propagate.
+const OG_CACHE_CONTROL = "public, max-age=600, s-maxage=600, stale-while-revalidate=86400";
 
-// ── Fixed section heights ────────────────────────────────────────────────────
-const HEADER_H = 52; // brand bar
+// ── Canvas ───────────────────────────────────────────────────────────────────
+// Twitter summary_large_image renders 2:1; 1200×628 is the safe landscape size
+// (the old 1080×1080 square was center-cropped in the timeline).
+const W = 1200;
+const H = 628;
+const PAD = 56; // horizontal content margin
+
+// ── Fixed section heights (signal list takes whatever remains) ────────────────
+const HEADER_H = 70; // brand + date bar
 const GOLD_BAR = 3; // gold rule under header
-const HERO_H = 90; // "DAILY EDGE" + meta
-const DIVIDER = 1; // hairline before signals
-const FOOTER_H = 52; // bottom bar
-const FOOTER_RULE = 1;
-// SIGNAL_H is whatever remains:
+const HERO_H = 190; // top-signal hero block (headline + multi-line factual detail)
+const DIVIDER = 1; // hairline before the signal list
+const FOOTER_RULE = 1; // gold rule above footer
+const FOOTER_H = 52; // CTA bar
 const SIGNAL_H = H - HEADER_H - GOLD_BAR - HERO_H - DIVIDER - FOOTER_RULE - FOOTER_H;
-// = 1080 - 52 - 3 - 90 - 1 - 1 - 52 = 881
+// = 628 - 70 - 3 - 190 - 1 - 1 - 52 = 311
 
 // ── Brand palette ────────────────────────────────────────────────────────────
 const BG = "#060606";
 const TEXT = "#F0EDE6";
 const TEXT2 = "#A7AFBC";
 const TEXT3 = "#5E6B80";
-const TEXT4 = "#394557";
+const TEXT4 = "#3C4659";
 const ACCENT = "#D4AF37";
+const GOLD_CTA = "#CDA94A"; // muted gold — footer CTA
 
 // ── Module-level caches ──────────────────────────────────────────────────────
 let _fontsP = null;
@@ -51,6 +58,7 @@ function getFonts() {
     _fontsP = Promise.all([
       loadGoogleFont("Raleway", 800),
       loadGoogleFont("Raleway", 700),
+      loadGoogleFont("Raleway", 500),
       loadGoogleFont("DM Mono", 400),
     ]).catch((err) => {
       _fontsP = null;
@@ -78,13 +86,13 @@ const CATS = [
   [/hack|exploit|drain|draining|attack|vuln|rug|scam|breach|freeze|blacklist/i, "SECURITY", "#EF4444"],
   [/govern|vote|dao|proposal|futarch|on-chain|onchain/i, "GOVERNANCE", "#A855F7"],
   [/privacy|encrypt|zkp|private|confidential|zero.?knowledge/i, "PRIVACY", "#8B5CF6"],
-  [/layer.?2|l2|rollup|zk.?proof|bridge|infra|quantum|post.?quantum|evm|signature/i, "INFRA", "#6366F1"],
-  [/defi|tvl|liquidity|pool|yield|amm|dex|lend|borrow|vault|protocol/i, "DEFI", "#10B981"],
+  [/layer.?[12]|\bl[12]\b|rollup|zk.?proof|bridge|infra|devnet|testnet|mainnet|hard.?fork|upgrade|scaling|consensus|sequencer|validator|quantum|post.?quantum|evm|signature/i, "INFRA", "#6366F1"],
+  [/defi|tvl|liquidity|pool|yield|amm|dex|lend|borrow|vault|protocol|collateral|apy|stablecoin/i, "DEFI", "#10B981"],
   [/\bai\b|llm|agent|model|machine.?learn|gpt|intelligence|fetch.*skill|skills.*launch/i, "AI", "#F59E0B"],
-  [/browser|wallet|ux|app|platform|sdk|cli|launch|tool|comet/i, "PRODUCT", "#60A5FA"],
+  [/browser|wallet|ux|app|platform|sdk|cli|launch|deploy|tool|comet|card/i, "PRODUCT", "#60A5FA"],
   [/btc|bitcoin|halv|miner|hash/i, "BITCOIN", "#F97316"],
   [/regul|(?<!\w)sec(?!\w)|cftc|legal|law|court|comply|compliance/i, "REGULATORY", "#EC4899"],
-  [/market|price|bull|bear|rally|dump|ath|fund|vc|raise|capital|valuat/i, "MARKETS", ACCENT],
+  [/market|price|bull|bear|rally|dump|ath|fund|vc|raise|capital|valuat|whale|exits?\b|position/i, "MARKETS", ACCENT],
 ];
 
 function detectCat(title, body) {
@@ -96,22 +104,42 @@ function detectCat(title, body) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const DAYS = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
+const DAYS_SHORT = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 
 function fmtDate(dateStr) {
   const d = new Date(dateStr + "T00:00:00Z");
-  return {
-    dayName: DAYS[d.getUTCDay()],
-    short: `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`,
-  };
+  return `${DAYS_SHORT[d.getUTCDay()]} · ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
 }
 
-function trunc(str, max) {
-  if (!str || str.length <= max) return str;
-  const cut = str.slice(0, max);
+// Clean word-boundary clip — NO trailing ellipsis (a visible "…" reads as cut-off
+// on a social card).  Strips dangling punctuation left by the cut.
+const TRAIL_STOP = /[\s,;:.—–-]*\b(?:with|its|the|a|an|of|on|to|and|for|in|at|by|as|or|from|into|over|that|this|s)\s*$/i;
+function clip(str, max) {
+  const s = (str || "").replace(/\s+/g, " ").trim();
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max);
   const sp = cut.lastIndexOf(" ");
-  return (sp > max * 0.7 ? cut.slice(0, sp) : cut) + "…";
+  let out = (sp > max * 0.6 ? cut.slice(0, sp) : cut).replace(/[\s,;:.—–-]+$/, "").trim();
+  // Drop a dangling trailing connective word so the clip doesn't read mid-thought.
+  out = out.replace(TRAIL_STOP, "").trim();
+  return out;
+}
+
+// Sentence-aware fit for the detail lines: keep as many WHOLE sentences as fit in `max`
+// so a detail never trails off mid-thought ("...diversified earn").  Falls back to a
+// word-boundary clip only when the very first sentence already overflows.
+const SENT_SPLIT = /(?<=[.!?])\s+/;
+function fitSentences(str, max) {
+  const s = (str || "").replace(/\s+/g, " ").trim();
+  if (s.length <= max) return s;
+  let out = "";
+  for (const sent of s.split(SENT_SPLIT)) {
+    const cand = out ? `${out} ${sent}` : sent;
+    if (cand.length <= max) out = cand;
+    else break;
+  }
+  return out || clip(s, max);
 }
 
 function parseBullets(content) {
@@ -136,50 +164,112 @@ function parseBullets(content) {
   return bullets;
 }
 
-const HERO_TITLES = {
-  daily:   ["DAILY EDGE"],
-  weekly:  ["WEEKLY ROUNDUP"],
-  markets: ["MARKET SIGNALS"],
-  alpha:   ["ALPHA BRIEF"],
-  defi:    ["DEFI PULSE"],
+const EYEBROW = {
+  daily:   "TODAY'S TOP SIGNAL",
+  weekly:  "THIS WEEK'S TOP SIGNAL",
+  markets: "TOP MARKET SIGNAL",
+  alpha:   "TODAY'S TOP ALPHA",
+  defi:    "TOP DEFI SIGNAL",
 };
+
+// ── Reusable bits ───────────────────────────────────────────────────────────
+function Badge({ cat, large }) {
+  return (
+    <div
+      style={{
+        display: "flex", alignItems: "center", flexShrink: 0,
+        backgroundColor: `${cat.color}1F`,
+        border: `1px solid ${cat.color}59`,
+        borderRadius: 5,
+        padding: large ? "5px 12px" : "3px 9px",
+      }}
+    >
+      <span
+        style={{
+          color: cat.color, fontFamily: "DM Mono",
+          fontSize: large ? 13 : 10,
+          letterSpacing: "0.14em", textTransform: "uppercase", lineHeight: 1,
+        }}
+      >
+        {cat.label}
+      </span>
+    </div>
+  );
+}
+
+function Arrow({ color, size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={{ marginLeft: 9 }}>
+      <path
+        d="M3 12h16M13 6l6 6-6 6"
+        stroke={color} strokeWidth="2.4"
+        strokeLinecap="round" strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
 
 // ── Route ─────────────────────────────────────────────────────────────────────
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const type = searchParams.get("type") ?? "daily";
-  const maxN = Math.min(parseInt(searchParams.get("bullets") ?? "10", 10), 10);
+  const maxN = Math.max(1, Math.min(parseInt(searchParams.get("bullets") ?? "5", 10) || 5, 5));
   let dateStr = searchParams.get("date");
 
   if (!dateStr) dateStr = await latestDate();
   if (!dateStr) return new Response("No digest found", { status: 404 });
+  // Reject malformed AND numeric-but-invalid dates (e.g. 2026-13-99) before the SQL date
+  // cast — otherwise the cast throws and the card 500s on a public URL.
+  if (!isValidDigestDate(dateStr)) return new Response("Bad date", { status: 400 });
+
+  // Cache-first: serve the bot-rendered card (app/og_cache.py warms digest_og post-digest)
+  // so the public route does NOT run satori on every request. Live render below is only the
+  // fallback for a genuine cache miss (e.g. before the post-digest warm has run).
+  const cached = await getOgCard(dateStr);
+  if (cached?.png) {
+    return new Response(cached.png, {
+      status: 200,
+      headers: { "Content-Type": cached.mime || "image/png", "Cache-Control": OG_CACHE_CONTROL },
+    });
+  }
 
   const digest = await getDigest(dateStr);
   if (!digest) return new Response(`No digest for ${dateStr}`, { status: 404 });
 
-  const bullets = parseBullets(digest.content).slice(0, maxN);
-  if (!bullets.length) return new Response("No bullets in digest", { status: 404 });
+  const all = parseBullets(digest.content);
+  if (!all.length) return new Response("No bullets in digest", { status: 404 });
 
-  const n = bullets.length;
+  // ── Rank by importance score (highest first); ties / unscored keep digest order ──
+  const analyses = await getBulletAnalyses(dateStr);
+  const ranked = all
+    .map((b, i) => ({ ...b, score: analyses[b.title]?.importanceScore ?? null, _i: i }))
+    .sort((a, b) => {
+      const sa = a.score ?? -1, sb = b.score ?? -1;
+      return sb !== sa ? sb - sa : a._i - b._i;
+    });
 
-  // ── Hero title with dynamic themes ──────────────────────────────────────
-  const themes = [...new Set(
-    bullets.map(b => detectCat(b.title, b.body).label)
-  )].slice(0, 3);
-  const heroTitle = `${n} SIGNALS SHAPING CRYPTO`;
-  const heroThemes = themes.join(" • ");
+  const shown = ranked.slice(0, maxN);
+  const moreCount = all.length - shown.length;
 
-  // ── Adaptive sizing: Bloomberg-style hierarchy ─────────────────────────
-  // Signal #1 is visually dominant (56px), #2+ are secondary (34px)
-  const getSignalSize = (idx) => idx === 0 ? 56 : 34;
-  const descSize     = n <= 6 ? 18 : 16;
-  const showDesc     = n <= 9;
-  const titleMaxLen  = n <= 4 ? 62 : n <= 6 ? 56 : n <= 8 ? 50 : 44;
-  const descMaxLen   = n <= 4 ? 110 : n <= 6 ? 92 : 76;
-  const padV         = n <= 4 ? 20 : n <= 6 ? 14 : n <= 8 ? 10 : 8;
-  const cardGap      = 0; // spacing handled by separator lines
+  const hero = shown[0];
+  const rest = shown.slice(1);
 
-  const { dayName, short } = fmtDate(dateStr);
+  const heroCat = detectCat(hero.title, hero.body);
+  const hl = hero.title.length;
+  // Single-line hero headline so the factual detail (up to 3 lines) below has room.
+  const heroSize = hl <= 18 ? 54 : hl <= 26 ? 46 : hl <= 34 ? 40 : 34;
+  const heroTitle = clip(hero.title, 42);
+  const heroDetail = fitSentences(hero.body, 300); // the factual "what happened", up to 3 lines
+
+  // Per-row detail wraps to 2 lines (3 when rows are taller); fitSentences keeps it whole.
+  const sc = rest.length;
+  const secSize = sc <= 2 ? 30 : sc === 3 ? 27 : 25;
+  const secClip = sc <= 2 ? 50 : 44;
+  const detLines = sc <= 2 ? 3 : 2; // clamp so a long detail never bleeds into the next row
+  const detClip = sc <= 2 ? 340 : 220; // sentence budget ≈ detLines worth of text
+
+  const dateLabel = fmtDate(dateStr);
+  const eyebrow = EYEBROW[type] ?? EYEBROW.daily;
 
   const [fonts, assets] = await Promise.all([getFonts(), getAssets()]);
 
@@ -194,336 +284,235 @@ export async function GET(request) {
           fontFamily: "Raleway",
         }}
       >
-        {/* ══ HEADER BAR ════════════════════════════════════════════════════ */}
+        {/* ══ HEADER ════════════════════════════════════════════════════════ */}
         <div
           style={{
             display: "flex", flexDirection: "row",
             alignItems: "center", justifyContent: "space-between",
-            padding: `0 ${PAD}px`,
-            height: HEADER_H, flexShrink: 0,
+            padding: `0 ${PAD}px`, height: HEADER_H, flexShrink: 0,
           }}
         >
-          {/* Brand left */}
-          <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-            <img src={assets.falcon} width={28} height={28} style={{ objectFit: "contain" }} />
+          {/* Brand + date (date is a first-class element beside the logo) */}
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <img src={assets.falcon} width={34} height={34} style={{ objectFit: "contain" }} />
             <span
               style={{
-                color: ACCENT, fontSize: 17, fontWeight: 800,
+                color: ACCENT, fontSize: 23, fontWeight: 800,
                 letterSpacing: "0.2em", fontFamily: "Raleway", lineHeight: 1,
               }}
             >
               HORYON
             </span>
+            <div style={{ width: 1, height: 24, backgroundColor: "rgba(255,255,255,0.14)" }} />
             <span
               style={{
-                color: TEXT4, fontSize: 7.5, fontFamily: "DM Mono",
-                letterSpacing: "0.18em", textTransform: "uppercase", lineHeight: 1,
+                color: ACCENT, fontSize: 14, fontFamily: "DM Mono",
+                letterSpacing: "0.12em", lineHeight: 1,
               }}
             >
-              · CRYPTO INTELLIGENCE FEED
+              {dateLabel}
             </span>
           </div>
 
-          {/* Right */}
+          {/* Subtitle — muted, right */}
           <span
             style={{
-              color: ACCENT, fontSize: 12, fontFamily: "DM Mono",
-              letterSpacing: "0.12em", lineHeight: 1,
+              color: TEXT4, fontSize: 10.5, fontFamily: "DM Mono",
+              letterSpacing: "0.22em", textTransform: "uppercase", lineHeight: 1,
             }}
           >
-            HORYON.AI
+            CRYPTO INTELLIGENCE FEED
           </span>
         </div>
 
         {/* ══ GOLD BAR ══════════════════════════════════════════════════════ */}
         <div style={{ width: W, height: GOLD_BAR, backgroundColor: ACCENT, flexShrink: 0 }} />
 
-        {/* ══ HERO SECTION ══════════════════════════════════════════════════ */}
+        {/* ══ HERO — top-scored signal ══════════════════════════════════════ */}
         <div
           style={{
-            display: "flex", flexDirection: "row",
-            alignItems: "center", justifyContent: "space-between",
-            padding: `0 ${PAD}px`,
-            height: HERO_H, flexShrink: 0,
-            position: "relative",
-            overflow: "hidden",
+            display: "flex", flexDirection: "row", alignItems: "stretch",
+            padding: `0 ${PAD}px`, height: HERO_H, flexShrink: 0,
+            position: "relative", overflow: "hidden",
           }}
         >
-          {/* Falcon — subtle brand watermark, right-anchored */}
-          <img
-            src={assets.falcon}
+          {/* Gold accent left border */}
+          <div
             style={{
-              position: "absolute",
-              right: PAD - 10,
-              top: 0,
-              height: HERO_H + 30,
-              width: 140,
-              objectFit: "contain",
-              objectPosition: "right center",
-              opacity: 0.03,
+              width: 5, borderRadius: 3, backgroundColor: ACCENT,
+              marginTop: 30, marginBottom: 30, flexShrink: 0,
             }}
           />
 
-          {/* Hero title + themes */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div
+            style={{
+              flex: 1, marginLeft: 26,
+              display: "flex", flexDirection: "column", justifyContent: "center", gap: 12,
+            }}
+          >
+            {/* Eyebrow + hero category badge */}
+            <div
+              style={{
+                display: "flex", flexDirection: "row",
+                alignItems: "center", justifyContent: "space-between",
+              }}
+            >
+              <span
+                style={{
+                  color: ACCENT, fontSize: 14, fontFamily: "DM Mono",
+                  letterSpacing: "0.24em", textTransform: "uppercase", lineHeight: 1,
+                }}
+              >
+                {eyebrow}
+              </span>
+              <Badge cat={heroCat} large />
+            </div>
+
+            {/* Hero headline (single line) */}
             <span
               style={{
-                color: TEXT,
-                fontSize: 64,
-                fontWeight: 800,
-                letterSpacing: "-0.04em",
-                lineHeight: 0.95,
-                textTransform: "uppercase",
+                color: TEXT, fontSize: heroSize, fontWeight: 800, fontFamily: "Raleway",
+                textTransform: "uppercase", letterSpacing: "-0.01em", lineHeight: 1.03,
+                whiteSpace: "nowrap", overflow: "hidden",
               }}
             >
               {heroTitle}
             </span>
 
-            <span
-              style={{
-                color: ACCENT,
-                fontSize: 16,
-                fontFamily: "DM Mono",
-                letterSpacing: "0.12em",
-                textTransform: "uppercase",
-              }}
-            >
-              {heroThemes}
-            </span>
-          </div>
-
-          {/* Meta — date right-aligned */}
-          <div
-            style={{
-              display: "flex", flexDirection: "column",
-              alignItems: "flex-end", gap: 5,
-              paddingRight: 8,
-            }}
-          >
-            <span
-              style={{
-                color: TEXT3, fontSize: 12, fontFamily: "DM Mono",
-                letterSpacing: "0.1em", textTransform: "uppercase", lineHeight: 1,
-              }}
-            >
-              {dayName}
-            </span>
-            <span
-              style={{
-                color: TEXT3, fontSize: 11, fontFamily: "DM Mono",
-                letterSpacing: "0.08em", lineHeight: 1,
-              }}
-            >
-              {short}
-            </span>
+            {/* Hero factual detail — the actual news (numbers, names), up to 3 lines */}
+            {heroDetail && (
+              <span
+                style={{
+                  display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 3,
+                  overflow: "hidden", color: TEXT2, fontSize: 22, fontWeight: 500,
+                  fontFamily: "Raleway", lineHeight: 1.32,
+                }}
+              >
+                {heroDetail}
+              </span>
+            )}
           </div>
         </div>
 
-        {/* ══ HAIRLINE BEFORE SIGNALS ════════════════════════════════════════ */}
-        <div
-          style={{
-            width: W, height: DIVIDER,
-            backgroundColor: "rgba(255,255,255,0.08)",
-            flexShrink: 0,
-          }}
-        />
+        {/* ══ HAIRLINE ══════════════════════════════════════════════════════ */}
+        <div style={{ width: W, height: DIVIDER, backgroundColor: "rgba(255,255,255,0.08)", flexShrink: 0 }} />
 
         {/* ══ SIGNAL LIST ═══════════════════════════════════════════════════ */}
         <div
           style={{
             height: SIGNAL_H, flexShrink: 0,
             display: "flex", flexDirection: "column",
-            position: "relative",
-            overflow: "hidden",
+            position: "relative", overflow: "hidden",
           }}
         >
-          {/* Falcon watermark — behind signals, very subtle */}
+          {/* Subtle falcon watermark, bleeding off the right edge */}
           <img
             src={assets.falcon}
             style={{
-              position: "absolute",
-              right: -40,
-              top: "50%",
-              marginTop: -240,
-              width: 480,
-              height: 480,
-              objectFit: "contain",
-              opacity: 0.03,
+              position: "absolute", right: -70, top: "50%", marginTop: -200,
+              width: 400, height: 400, objectFit: "contain", opacity: 0.03,
             }}
           />
 
-          {bullets.map((bullet, idx) => {
-            const cat = detectCat(bullet.title, bullet.body);
-            const titleText = trunc(bullet.title, titleMaxLen);
-            const descText = showDesc && bullet.body ? trunc(bullet.body, descMaxLen) : "";
-            const isLast = idx === n - 1;
-            const isFirst = idx === 0;
-            const titleSize = getSignalSize(idx);
-            const flexGrow = isFirst ? 1.5 : 1;
-            const bgColor = idx % 2 === 0 ? "rgba(255,255,255,0.015)" : "transparent";
-
+          {rest.map((b, idx) => {
+            const cat = detectCat(b.title, b.body);
+            const isLast = idx === rest.length - 1;
             return (
               <div
                 key={idx}
                 style={{
-                  flex: flexGrow,
-                  display: "flex", flexDirection: "column",
-                  justifyContent: "center",
-                  padding: `${padV}px ${PAD}px`,
-                  paddingLeft: 48,
-                  backgroundColor: bgColor,
-                  borderBottom: isLast
-                    ? "none"
-                    : "1px solid rgba(255,255,255,0.07)",
-                  position: "relative",
-                  overflow: "hidden",
+                  flex: 1,
+                  display: "flex", flexDirection: "row", alignItems: "center",
+                  padding: `0 ${PAD}px`,
+                  borderBottom: isLast ? "none" : "1px solid rgba(255,255,255,0.06)",
+                  position: "relative", overflow: "hidden",
                 }}
               >
-                {/* Large background number */}
-                <span
-                  style={{
-                    position: "absolute",
-                    left: 24,
-                    top: 10,
-                    fontSize: 56,
-                    fontWeight: 800,
-                    opacity: 0.10,
-                    color: cat.color,
-                    lineHeight: 1,
-                  }}
-                >
-                  {String(idx + 1).padStart(2, "0")}
-                </span>
-
-                {/* Category accent stripe on left edge */}
+                {/* Category accent stripe (full row height) */}
                 <div
                   style={{
-                    position: "absolute",
-                    left: 0, top: 0, bottom: 0,
-                    width: 3,
-                    backgroundColor: cat.color,
-                    opacity: 0.55,
+                    width: 3, height: 44, borderRadius: 2,
+                    backgroundColor: cat.color, opacity: 0.7,
+                    marginRight: 22, flexShrink: 0,
                   }}
                 />
 
-                {/* Title row */}
+                {/* Headline + factual detail (two clean lines, no ellipsis) */}
                 <div
                   style={{
-                    display: "flex", flexDirection: "row",
-                    alignItems: "flex-start",
-                    gap: 12,
+                    flex: 1, display: "flex", flexDirection: "column",
+                    justifyContent: "center", gap: 4, overflow: "hidden",
                   }}
                 >
-                  {/* Title */}
                   <span
                     style={{
-                      color: TEXT,
-                      fontSize: titleSize,
-                      fontWeight: 800,
-                      fontFamily: "Raleway",
-                      textTransform: "uppercase",
-                      letterSpacing: "0.01em",
-                      lineHeight: 1.05,
-                      flex: 1,
-                      overflow: "hidden",
+                      color: TEXT, fontSize: secSize, fontWeight: 800,
+                      fontFamily: "Raleway", textTransform: "uppercase",
+                      letterSpacing: "0.005em", lineHeight: 1.08,
+                      whiteSpace: "nowrap", overflow: "hidden",
                     }}
                   >
-                    {titleText}
+                    {clip(b.title, secClip)}
                   </span>
-
-                  {/* Category tag — reduced visual weight */}
-                  <div
-                    style={{
-                      display: "flex", flexShrink: 0, alignItems: "center",
-                      backgroundColor: `${cat.color}14`,
-                      border: `1px solid ${cat.color}40`,
-                      borderRadius: 4,
-                      padding: "2px 8px",
-                      opacity: 0.8,
-                    }}
-                  >
+                  {b.body && (
                     <span
                       style={{
-                        color: cat.color, fontSize: 8, fontFamily: "DM Mono",
-                        letterSpacing: "0.12em", textTransform: "uppercase", lineHeight: 1,
+                        display: "-webkit-box", WebkitBoxOrient: "vertical",
+                        WebkitLineClamp: detLines, overflow: "hidden",
+                        color: TEXT3, fontSize: 16.5, fontWeight: 500,
+                        fontFamily: "Raleway", lineHeight: 1.32,
                       }}
                     >
-                      {cat.label}
+                      {fitSentences(b.body, detClip)}
                     </span>
-                  </div>
+                  )}
                 </div>
 
-                {/* Description — single concise line */}
-                {descText ? (
-                  <div
-                    style={{
-                      display: "flex",
-                      marginTop: 6,
-                    }}
-                  >
-                    <span
-                      style={{
-                        color: TEXT2,
-                        fontSize: descSize,
-                        fontFamily: "Raleway",
-                        fontWeight: 400,
-                        lineHeight: 1.35,
-                        overflow: "hidden",
-                      }}
-                    >
-                      {descText}
-                    </span>
-                  </div>
-                ) : null}
+                {/* Category badge, inline right */}
+                <div style={{ display: "flex", marginLeft: 18, flexShrink: 0 }}>
+                  <Badge cat={cat} />
+                </div>
               </div>
             );
           })}
         </div>
 
-        {/* ══ THIN GOLD RULE ════════════════════════════════════════════════ */}
-        <div
-          style={{
-            width: W, height: FOOTER_RULE,
-            backgroundColor: "rgba(212,175,55,0.30)",
-            flexShrink: 0,
-          }}
-        />
+        {/* ══ GOLD RULE ═════════════════════════════════════════════════════ */}
+        <div style={{ width: W, height: FOOTER_RULE, backgroundColor: "rgba(212,175,55,0.30)", flexShrink: 0 }} />
 
         {/* ══ FOOTER ════════════════════════════════════════════════════════ */}
         <div
           style={{
             display: "flex", flexDirection: "row",
             alignItems: "center", justifyContent: "space-between",
-            padding: `0 ${PAD}px`,
-            height: FOOTER_H, flexShrink: 0,
+            padding: `0 ${PAD}px`, height: FOOTER_H, flexShrink: 0,
           }}
         >
+          {/* CTA */}
+          <div style={{ display: "flex", flexDirection: "row", alignItems: "center" }}>
+            <span
+              style={{
+                color: GOLD_CTA, fontSize: 14, fontFamily: "DM Mono",
+                letterSpacing: "0.16em", textTransform: "uppercase", lineHeight: 1,
+              }}
+            >
+              FULL INTEL AT HORYON.AI
+            </span>
+            <Arrow color={GOLD_CTA} />
+          </div>
+
+          {/* "+ N more" count, else tagline */}
           <span
             style={{
-              color: TEXT2, fontSize: 10, fontFamily: "DM Mono",
-              letterSpacing: "0.1em", textTransform: "uppercase", lineHeight: 1,
+              color: TEXT3, fontSize: 11.5, fontFamily: "DM Mono",
+              letterSpacing: "0.16em", textTransform: "uppercase", lineHeight: 1,
             }}
           >
-            THE MARKET MOVES. WE HELP YOU SEE IT FIRST.
+            {moreCount > 0 ? `+ ${moreCount} more signals today` : "THE MARKET MOVES — WE SEE IT FIRST"}
           </span>
-          <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
-            {["ACTIONABLE INTEL.", "REAL-TIME EDGE.", "BUILT FOR CRYPTO LEADERS."].map(
-              (t) => (
-                <span
-                  key={t}
-                  style={{
-                    color: TEXT4, fontSize: 8, fontFamily: "DM Mono",
-                    letterSpacing: "0.1em", textTransform: "uppercase", lineHeight: 1,
-                  }}
-                >
-                  {t}
-                </span>
-              )
-            )}
-          </div>
         </div>
       </div>
     ),
-    { width: W, height: H, fonts }
+    { width: W, height: H, fonts, headers: { "Cache-Control": OG_CACHE_CONTROL } }
   );
 }

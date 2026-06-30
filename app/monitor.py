@@ -1,13 +1,31 @@
 """Monitoring dashboard (Flask). Shows container status, ingestion stats, digest
 history, keyword analysis history, and per-source health (Twitter vs News).
 Served behind Caddy at /monitor. All times displayed in UTC+2.
+
+In dev mode (BOT_USE_POLLING=true) an extra "Database" panel appears at the top
+with controls to restore a prod backup or wipe to an empty state.  The backup
+dir (~/.horyon-db-backups on the host, bind-mounted at /horyon-backups in the
+container via docker-compose.dev.yml) is scanned for available dumps.
+
+The panel is hidden — and the restore/wipe endpoint returns 403 — whenever
+DATABASE_URL points at a REMOTE host (external-db / test-machine mode against the
+prod DB). That way the destructive controls can never be aimed at prod; the
+read-only DB role on the test machine is the second, DB-enforced layer.
 """
 from __future__ import annotations
 
+import glob
+import hmac
+import io
 import logging
+import os
+import re
+import tarfile
+import threading
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, Response, jsonify, render_template_string, request
 
 from . import config, db, embeddings
 from .feeds import SOURCES
@@ -15,12 +33,59 @@ from .feeds import SOURCES
 log = logging.getLogger(__name__)
 app = Flask(__name__)
 
+
+@app.before_request
+def _require_basic_auth():
+    """Gate the whole dashboard behind HTTP Basic Auth when credentials are
+    configured. No-op when unset (prod sits behind Caddy basic-auth instead).
+    Guards the DB restore/wipe panel on publicly-exposed dev/test boxes."""
+    # /healthz must stay open — the container healthcheck hits it without
+    # credentials; gating it would peg the monitor 'unhealthy' forever.
+    if request.path == "/healthz":
+        return None
+    user = config.MONITOR_AUTH_USER
+    pw = config.MONITOR_AUTH_PASS
+    if not (user and pw):
+        return None
+    auth = request.authorization
+    ok = (
+        auth is not None
+        and hmac.compare_digest(auth.username or "", user)
+        and hmac.compare_digest(auth.password or "", pw)
+    )
+    if not ok:
+        return Response(
+            "Authentication required.",
+            401,
+            {"WWW-Authenticate": 'Basic realm="Horyon Monitor"'},
+        )
+    return None
+
 UTC2 = timezone(timedelta(hours=2))
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+# Hosts that mean "our own local db container", i.e. NOT the prod DB reached over
+# an SSH tunnel. Anything else (host.docker.internal, a real IP/hostname) is remote.
+_LOCAL_DB_HOSTS = {"db", "localhost", "127.0.0.1", "::1", "", None}
+
+
+def _db_is_remote() -> bool:
+    """True when DATABASE_URL points at a non-local host (external-db/test mode).
+
+    Used to keep the destructive 'Database' panel + its endpoint OFF whenever the
+    monitor is wired to the prod DB through the SSH tunnel, so a wipe/restore can
+    never be aimed at prod. Belt to the read-only DB role's suspenders.
+    """
+    try:
+        host = urlsplit(config.DATABASE_URL).hostname
+    except Exception:
+        return False  # un-parseable → treat as local (dev default), don't over-block
+    return host not in _LOCAL_DB_HOSTS
+
+
 def _fmt(dt, fmt: str = "%Y-%m-%d %H:%M") -> str:
     """Format a datetime in UTC+2."""
     if not dt:
@@ -89,6 +154,113 @@ def _fmt_dur(ms: int | None) -> str:
     return f"{m}m {s}s"
 
 
+# --------------------------------------------------------------------------- #
+# Dev-mode data-switch state + helpers
+# --------------------------------------------------------------------------- #
+
+_restore_state: dict = {"status": "idle", "message": ""}
+_restore_lock = threading.Lock()
+
+
+def _list_backups() -> list[dict]:
+    """Return available backup dates from BACKUP_DIR, newest first."""
+    pattern = os.path.join(config.BACKUP_DIR, "crypto-*.dump.part*")
+    sizes: dict[str, int] = {}
+    for p in glob.glob(pattern):
+        m = re.search(r"crypto-(\d{4}-\d{2}-\d{2})\.dump\.part", p)
+        if m:
+            d = m.group(1)
+            sizes[d] = sizes.get(d, 0) + os.path.getsize(p)
+    return [
+        {"date": d, "size": f"{sizes[d] // 1024 // 1024}MB"}
+        for d in sorted(sizes, reverse=True)
+    ]
+
+
+def _restore_worker(date_str: str, password: str) -> None:
+    global _restore_state
+    try:
+        with _restore_lock:
+            _restore_state = {"status": "running", "message": f"reading parts for {date_str}…"}
+
+        pattern = os.path.join(config.BACKUP_DIR, f"crypto-{date_str}.dump.part*")
+        parts = sorted(glob.glob(pattern))
+        if not parts:
+            raise FileNotFoundError(f"No backup parts for {date_str} in {config.BACKUP_DIR}")
+
+        dump_bytes = bytearray()
+        for p in parts:
+            with open(p, "rb") as f:
+                dump_bytes.extend(f.read())
+
+        total_mb = len(dump_bytes) // 1024 // 1024
+        with _restore_lock:
+            _restore_state["message"] = f"uploading {total_mb}MB to horyon-db…"
+
+        # Wrap in a tar archive so we can use put_archive (avoids stdin piping)
+        tar_buf = io.BytesIO()
+        with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+            info = tarfile.TarInfo(name="restore.dump")
+            info.size = len(dump_bytes)
+            tar.addfile(info, io.BytesIO(bytes(dump_bytes)))
+        tar_buf.seek(0)
+
+        import docker as _docker
+        client = _docker.from_env()
+        db_container = client.containers.get("horyon-db")
+        db_container.put_archive("/tmp", tar_buf)
+        del dump_bytes, tar_buf  # free memory before the long restore
+
+        with _restore_lock:
+            _restore_state["message"] = "running pg_restore (this takes a minute)…"
+
+        result = db_container.exec_run(
+            ["pg_restore", "-U", "crypto", "-d", "crypto",
+             "--clean", "--if-exists", "--no-owner", "--no-privileges",
+             "/tmp/restore.dump"],
+            environment={"PGPASSWORD": password},
+        )
+        db_container.exec_run(["rm", "-f", "/tmp/restore.dump"])
+
+        if result.exit_code != 0:
+            stderr = (result.output or b"").decode(errors="replace")[-400:]
+            raise RuntimeError(f"pg_restore exited {result.exit_code}: {stderr}")
+
+        with _restore_lock:
+            _restore_state = {"status": "done", "message": f"restored {date_str} ({total_mb}MB) ✓"}
+
+    except Exception as exc:
+        log.error("db restore failed: %s", exc)
+        with _restore_lock:
+            _restore_state = {"status": "error", "message": str(exc)[:300]}
+
+
+def _wipe_worker() -> None:
+    global _restore_state
+    try:
+        with _restore_lock:
+            _restore_state = {"status": "running", "message": "truncating all tables…"}
+
+        with db._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename"
+            )
+            tables = [r[0] for r in cur.fetchall()]
+
+        if tables:
+            tlist = ", ".join(f'"{t}"' for t in tables)
+            with db._conn() as conn, conn.cursor() as cur:
+                cur.execute(f"TRUNCATE {tlist} CASCADE")
+
+        with _restore_lock:
+            _restore_state = {"status": "done", "message": f"wiped {len(tables)} tables ✓"}
+
+    except Exception as exc:
+        log.error("db wipe failed: %s", exc)
+        with _restore_lock:
+            _restore_state = {"status": "error", "message": str(exc)[:300]}
+
+
 def _containers() -> list[dict]:
     try:
         import docker
@@ -125,6 +297,89 @@ def _containers() -> list[dict]:
 def _q1(cur, sql, params=()):
     cur.execute(sql, params)
     return cur.fetchone()
+
+
+# Kaiko Research lands in feed_items as creator='Kaiko' (links under kaiko.com).
+# The ILIKE pattern is a bound param (_KAIKO_LINK) — embedding a literal '%…%' in
+# SQL passed to execute() with a params tuple makes psycopg2 read the % as a
+# placeholder and raise "tuple index out of range".
+_KAIKO_MATCH = "creator = 'Kaiko' OR link ILIKE %s"
+_KAIKO_LINK = "%kaiko.com%"
+
+
+def _kaiko() -> dict:
+    """Kaiko Research ingestion health + where Kaiko articles are actually used.
+
+    Two questions the dashboard answers: (1) is the 6h sitemap scrape pulling
+    articles into feed_items, and (2) which daily-digest bullets cite a Kaiko URL
+    (i.e. where the content surfaces downstream). Graceful — never raises."""
+    out: dict = {"total": 0, "citations": [], "articles": []}
+    try:
+        with db._conn() as conn, conn.cursor() as cur:
+            total, k7, k30, last_ing, last_pub = _q1(cur, f"""
+                SELECT count(*),
+                       count(*) FILTER (WHERE COALESCE(pub_date, ingested_at) >= now()-interval '7 days'),
+                       count(*) FILTER (WHERE COALESCE(pub_date, ingested_at) >= now()-interval '30 days'),
+                       max(ingested_at), max(COALESCE(pub_date, ingested_at))
+                  FROM feed_items WHERE {_KAIKO_MATCH}""", (_KAIKO_LINK,))
+
+            cur.execute(f"""
+                SELECT link, content, COALESCE(pub_date, ingested_at) AS ts
+                  FROM feed_items WHERE {_KAIKO_MATCH}
+                 ORDER BY ts DESC LIMIT 12""", (_KAIKO_LINK,))
+            recent = cur.fetchall()
+
+            # narrative signals whose source URL is a Kaiko article (another use site)
+            signals = 0
+            try:
+                signals = _q1(cur,
+                    "SELECT count(*) FROM narrative_signals WHERE url ILIKE %s",
+                    ("%kaiko.com%",))[0]
+            except Exception:
+                pass
+
+            # every digest whose stored content references a Kaiko link
+            cur.execute(
+                "SELECT date, content FROM crypto_digest WHERE content ILIKE %s ORDER BY date DESC",
+                ("%kaiko.com%",))
+            dig_rows = cur.fetchall()
+    except Exception as exc:
+        log.debug("kaiko stats failed: %s", exc)
+        return out
+
+    # Parse digest bullets and keep only those whose CITED link points at kaiko.com
+    # (mirrors _parse_digest_bullets: one bullet per line starting with •).
+    citations: list[dict] = []
+    for d, content in dig_rows:
+        for line in (content or "").replace("\r", "").split("\n"):
+            t = line.strip()
+            if not t.startswith("•"):
+                continue
+            link_m = re.search(r'<a[^>]*href="([^"]+)"', t, re.I)
+            if not (link_m and "kaiko.com" in link_m.group(1).lower()):
+                continue
+            title_m = re.search(r"<b>([\s\S]*?)</b>", t, re.I)
+            title = re.sub(r"<[^>]+>", "", title_m.group(1)).strip() if title_m else "—"
+            citations.append({"date": str(d), "title": title, "link": link_m.group(1)})
+
+    def _title(content: str) -> str:
+        # Kaiko items are stored as "Title. Summary" — recover the headline.
+        head = re.split(r"\.\s", content or "", 1)[0].strip()
+        return head[:100] if head else "—"
+
+    out.update({
+        "total": total or 0,
+        "last_7d": k7 or 0,
+        "last_30d": k30 or 0,
+        "last_ingested": _fmt(last_ing) if last_ing else "—",
+        "last_published": _fmt(last_pub) if last_pub else "—",
+        "signals": signals,
+        "citations": citations,
+        "cited_count": len(citations),
+        "cited_digests": len({c["date"] for c in citations}),
+        "articles": [{"link": r[0], "title": _title(r[1]), "ts": _fmt(r[2])} for r in recent],
+    })
+    return out
 
 
 def gather() -> dict:
@@ -247,8 +502,23 @@ def gather() -> dict:
     except Exception as exc:
         log.debug("get protocols count failed: %s", exc)
 
+    kaiko = _kaiko()
+
+    # Dev-mode data-switch panel
+    with _restore_lock:
+        restore_snap = dict(_restore_state)
+    db_switch: dict = {}
+    if config.BOT_USE_POLLING and not _db_is_remote():
+        db_switch = {
+            "backups": _list_backups(),
+            "status": restore_snap["status"],
+            "message": restore_snap["message"],
+            "backup_dir": config.BACKUP_DIR,
+        }
+
     return {
         "now": datetime.now(timezone.utc).astimezone(UTC2).strftime("%Y-%m-%d %H:%M:%S UTC+2"),
+        "is_dev": config.BOT_USE_POLLING,
         "containers": _containers(),
         "feed": {
             "total": feed_total, "embedded": feed_emb, "null": feed_null,
@@ -274,6 +544,8 @@ def gather() -> dict:
         "recent_digests": recent_digests,
         "recent_analyses": recent_analyses,
         "tvl": tvl_rows,
+        "kaiko": kaiko,
+        "db_switch": db_switch,
     }
 
 
@@ -281,6 +553,40 @@ def gather() -> dict:
 # Templates
 # --------------------------------------------------------------------------- #
 CONTENT = """
+{% if db_switch %}
+<h2 style="margin-top:16px">Database <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:11px;color:#8b949e">— dev mode</span></h2>
+<div class="db-panel">
+  <div class="db-row">
+    <span class="db-badge">DEV</span>
+    <span class="db-stat">{{ feed.total }} feed items &nbsp;·&nbsp; last digest {{ content.last_digest }}</span>
+    {% if db_switch.status == 'running' %}
+    <span class="db-msg muted">⏳ {{ db_switch.message }}</span>
+    {% elif db_switch.status == 'done' %}
+    <span class="db-msg ok">{{ db_switch.message }}</span>
+    {% elif db_switch.status == 'error' %}
+    <span class="db-msg bad">{{ db_switch.message }}</span>
+    {% endif %}
+  </div>
+  <div class="db-row db-actions">
+    {% if db_switch.backups %}
+    <span class="db-label">Prod backup:</span>
+    <select id="db-date" class="db-select">
+      {% for b in db_switch.backups %}
+      <option value="{{ b.date }}">{{ b.date }} ({{ b.size }})</option>
+      {% endfor %}
+    </select>
+    <button class="btn-restore" onclick="dbRestore()" {{ 'disabled' if db_switch.status == 'running' else '' }}>
+      Load prod data
+    </button>
+    {% else %}
+    <span class="muted small">No backups in <code>{{ db_switch.backup_dir }}</code> — run <code>scripts/db-restore.sh --pull</code> on the host first.</span>
+    {% endif %}
+    <button class="btn-wipe" onclick="dbWipe()" {{ 'disabled' if db_switch.status == 'running' else '' }}
+      style="margin-left:auto">Wipe to empty</button>
+  </div>
+</div>
+{% endif %}
+
 <p class="ts">{{ now }} &nbsp;·&nbsp; <span class="live-dot"></span> live refresh every 15s</p>
 
 <h2>Containers</h2>
@@ -316,6 +622,46 @@ CONTENT = """
  <td class="muted dur">{{ r.duration }}</td>
 </tr>{% endfor %}
 </table>
+
+<h2>Kaiko Research <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#8b949e;font-size:10px">(sitemap scrape · creator=Kaiko · 6h cron)</span></h2>
+{% if kaiko.total %}
+<div class="grid">
+ <div class="card"><div class="n">{{ kaiko.total }}</div><div class="l">articles ingested</div></div>
+ <div class="card"><div class="n">{{ kaiko.last_7d }}</div><div class="l">last 7d</div></div>
+ <div class="card"><div class="n">{{ kaiko.last_30d }}</div><div class="l">last 30d</div></div>
+ <div class="card"><div class="n small">{{ kaiko.last_ingested }}</div><div class="l">last ingest (UTC+2)</div></div>
+ <div class="card"><div class="n {{ 'ok' if kaiko.cited_count else 'muted' }}">{{ kaiko.cited_count }}</div><div class="l">bullets citing Kaiko</div></div>
+ <div class="card"><div class="n muted">{{ kaiko.signals }}</div><div class="l">narrative signals</div></div>
+</div>
+
+{% if kaiko.citations %}
+<h3 class="sub">Bullets citing Kaiko <span class="muted small">— {{ kaiko.cited_count }} across {{ kaiko.cited_digests }} digest(s)</span></h3>
+<table>
+<tr><th>Digest date</th><th>Bullet</th><th>Source</th></tr>
+{% for c in kaiko.citations %}<tr>
+ <td class="muted mono small"><a href="https://app.horyon.xyz/d/{{ c.date }}" target="_blank" rel="noopener">{{ c.date }}</a></td>
+ <td>{{ c.title }}</td>
+ <td class="small"><a href="{{ c.link }}" target="_blank" rel="noopener">🔗 kaiko</a></td>
+</tr>{% endfor %}
+</table>
+{% else %}
+<p class="muted">No daily-digest bullets have cited a Kaiko article yet.</p>
+{% endif %}
+
+{% if kaiko.articles %}
+<h3 class="sub">Recently ingested Kaiko articles</h3>
+<table>
+<tr><th>Date (UTC+2)</th><th>Title</th><th>Link</th></tr>
+{% for a in kaiko.articles %}<tr>
+ <td class="muted mono small">{{ a.ts }}</td>
+ <td>{{ a.title }}</td>
+ <td class="small"><a href="{{ a.link }}" target="_blank" rel="noopener">🔗</a></td>
+</tr>{% endfor %}
+</table>
+{% endif %}
+{% else %}
+<p class="muted">No Kaiko articles ingested yet — runs every 6h (<code>app.kaiko</code>). Seed with <code>docker exec horyon-bot python3 -m app.kaiko --backfill</code>.</p>
+{% endif %}
 
 <h2>Daily digest history</h2>
 {% if recent_digests %}
@@ -444,6 +790,7 @@ main{padding:24px 28px;max-width:1400px}
 /* ── Typography helpers ─────────────────────────────────── */
 h2{font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.8px;margin:32px 0 10px;padding-bottom:6px;border-bottom:1px solid #21262d}
 h2:first-of-type{margin-top:16px}
+h3.sub{font-size:11px;font-weight:600;color:#8b949e;margin:16px 0 8px;font-variant:normal}
 .ts{font-size:12px;color:#8b949e;margin-bottom:20px}
 .muted{color:#8b949e}
 .ok{color:#3fb950}
@@ -516,6 +863,22 @@ details[open] .src-toggle::before{transform:rotate(90deg)}
 .tvl-n{color:#79c0ff!important}
 .tvl-date{font-size:10px;color:#8b949e;margin-top:2px;font-family:ui-monospace,monospace}
 .chg-up{color:#3fb950}.chg-dn{color:#f85149}.chg-neu{color:#8b949e}
+
+/* ── Dev-mode DB switch panel ───────────────────────────────── */
+.db-panel{background:#0d1117;border:1px solid #d4af3755;border-radius:10px;padding:14px 18px;margin-bottom:4px;display:flex;flex-direction:column;gap:10px}
+.db-row{display:flex;align-items:center;flex-wrap:wrap;gap:10px}
+.db-badge{background:#3a2800;color:#d4af37;border:1px solid #d4af3766;border-radius:6px;padding:2px 10px;font-size:11px;font-weight:700;letter-spacing:.5px;flex-shrink:0}
+.db-stat{font-size:13px;color:#8b949e}
+.db-msg{font-size:12px}
+.db-label{font-size:12px;color:#8b949e;flex-shrink:0}
+.db-actions{flex-wrap:wrap}
+.db-select{background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;padding:4px 8px;font-size:13px;cursor:pointer}
+.btn-restore,.btn-wipe{border:none;border-radius:6px;padding:5px 14px;font-size:13px;cursor:pointer;font-weight:500;transition:opacity .15s;white-space:nowrap}
+.btn-restore{background:#196c2e;color:#aff5b4}
+.btn-restore:hover:not(:disabled){opacity:.85}
+.btn-wipe{background:#6d1f21;color:#ffa198}
+.btn-wipe:hover:not(:disabled){opacity:.85}
+.btn-restore:disabled,.btn-wipe:disabled{opacity:.35;cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -556,6 +919,22 @@ async function tick(){
 }
 setInterval(tick,15000);
 document.getElementById('topbar-ts').textContent=new Date().toLocaleTimeString();
+
+async function dbRestore(){
+  const sel=document.getElementById('db-date');
+  if(!sel)return;
+  const date=sel.value;
+  if(!confirm('Load prod backup '+date+'?\nThis replaces ALL current data in horyon-db.'))return;
+  const r=await fetch('/api/db-switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'restore',date})});
+  if(!r.ok){const e=await r.json().catch(()=>({}));alert('Error: '+(e.error||r.status));}
+  else setTimeout(tick,600);
+}
+async function dbWipe(){
+  if(!confirm('Wipe all data?\nSchema is preserved; every row is deleted.'))return;
+  const r=await fetch('/api/db-switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'wipe'})});
+  if(!r.ok){const e=await r.json().catch(()=>({}));alert('Error: '+(e.error||r.status));}
+  else setTimeout(tick,600);
+}
 </script>
 </body></html>
 """
@@ -593,6 +972,45 @@ def api_status():
         ]
     data["feed"]["by_type"] = [list(map(str, r)) for r in data["feed"]["by_type"]]
     return jsonify(data)
+
+
+@app.route("/api/db-switch", methods=["GET", "POST"])
+def api_db_switch():
+    """Dev-only endpoint: list / trigger restore or wipe. 403 in prod."""
+    if not config.BOT_USE_POLLING:
+        return jsonify({"error": "only available in dev mode (BOT_USE_POLLING=true)"}), 403
+    if _db_is_remote():
+        return jsonify({"error": "disabled — monitor is pointed at a remote DB (external-db/test mode); refusing to wipe/restore prod"}), 403
+
+    if request.method == "GET":
+        with _restore_lock:
+            return jsonify(dict(_restore_state))
+
+    body = request.get_json(silent=True) or {}
+    action = body.get("action", "")
+
+    with _restore_lock:
+        if _restore_state["status"] == "running":
+            return jsonify({"error": "a job is already in progress"}), 409
+
+    if action == "restore":
+        backups = _list_backups()
+        if not backups:
+            return jsonify({"error": f"no backups found in {config.BACKUP_DIR} — run db-restore.sh --pull on the host"}), 404
+        date = body.get("date", "")
+        available_dates = [b["date"] for b in backups]
+        if not date or date == "latest":
+            date = available_dates[0]
+        elif date not in available_dates:
+            return jsonify({"error": f"backup {date} not found"}), 404
+        threading.Thread(target=_restore_worker, args=(date, config.DB_PASSWORD), daemon=True).start()
+        return jsonify({"ok": True, "date": date}), 202
+
+    if action == "wipe":
+        threading.Thread(target=_wipe_worker, daemon=True).start()
+        return jsonify({"ok": True}), 202
+
+    return jsonify({"error": f"unknown action: {action!r}"}), 400
 
 
 @app.route("/healthz")

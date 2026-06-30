@@ -54,6 +54,14 @@ GENERIC_TERMS = BLOCKED_ALIASES | {
     "simple", "instant", "secure", "trust", "official", "real", "fun", "free",
     "idle", "movement", "bullish", "bearish", "push", "believe", "across",
     "stable", "credit", "savings", "saving", "select", "fixed", "smart", "auto",
+    # Common English words seen as junk single-word ALIASES (extraction noise) that
+    # flood the matcher — e.g. "hard"→Kava Lend, "link"→Chainlink, "next"→Connext,
+    # "move"→Movement. The real token (LINK, MOVE) appears all-caps and stays reachable
+    # via the brand NAME (case-sensitive). NOTE: do NOT add brand names that are also
+    # words (Base, Flow, Spark, Render, Strike) — those are handled by case-sensitive
+    # matching, not blocked.
+    "hard", "edge", "next", "move", "link", "farm", "coin", "call", "date", "deal",
+    "news", "live", "wave", "gate",
 }
 
 
@@ -204,22 +212,63 @@ def extract_and_upsert_entities(items: list[dict]) -> int:
 # Runtime: alias-match feed items → slugs
 # --------------------------------------------------------------------------- #
 
-def _load_alias_map() -> dict[str, str]:
-    """Return {alias_lower → slug} for all entity_memory rows."""
+# A single-token, purely-alphabetic, conventionally-capitalized brand name —
+# Titlecase ("Exodus", "Flow") or ALL-CAPS ("AERO") — is also a candidate common
+# English word, so it must be matched CASE-SENSITIVELY against the original-case text
+# (the brand appears capitalized; the common-noun usage is lowercase). Mirrors
+# searchEntityMemory Path 3 in web/lib/db.js so the two matchers never drift.
+_AMBIG_SINGLE_RE = re.compile(r"^([A-Z][a-z]+|[A-Z]+)$")
+_TITLECASE_RE = re.compile(r"^[A-Z][a-z]+$")
+
+
+def _ambiguous_single_word(name: str) -> bool:
+    return bool(name) and " " not in name and bool(_AMBIG_SINGLE_RE.match(name))
+
+
+def _cs_matchable(name: str, type_: str, mention_count: int) -> bool:
+    """Floor for case-sensitive single-word matches — mirrors web Path 3 floors."""
+    n = len(name)
+    if n >= 6:
+        return True
+    if _TITLECASE_RE.match(name) and 4 <= n <= 5:
+        return True
+    return (3 <= n <= 5 and (mention_count or 0) >= 6
+            and type_ in ("protocol", "chain", "dao", "exchange", "fund"))
+
+
+def _load_matchers() -> tuple[dict[str, str], list[tuple[re.Pattern, str]]]:
+    """Build (case-insensitive alias map, case-sensitive single-word patterns).
+
+    The bare lowercased name of a Titlecase/all-caps brand is kept OUT of the
+    case-insensitive map and matched only case-sensitively, so its common-English
+    -word usage ("exodus", "flow") can't leak as a false positive.
+    """
     rows = db.get_all_entity_aliases()
-    alias_map: dict[str, str] = {}
-    for slug, name, _type, aliases, _summary in rows:
-        alias_map[slug.lower()] = slug
-        alias_map[name.lower()] = slug
+    ci_map: dict[str, str] = {}
+    cs_patterns: list[tuple[re.Pattern, str]] = []
+    for slug, name, type_, aliases, _summary, mention_count in rows:
+        ambiguous = _ambiguous_single_word(name)
+        if ambiguous and _cs_matchable(name, type_, mention_count or 0):
+            cs_patterns.append((_cs_pattern(name), slug))
+        if not ambiguous:
+            # For ambiguous brands neither the slug nor the bare name may match
+            # case-insensitively (the slug ≈ the lowercased common word) — only the
+            # case-sensitive pattern above. The web matcher likewise never uses the slug.
+            ci_map[slug.lower()] = slug
+            ci_map[name.lower()] = slug
         for a in (aliases or []):
-            if a and len(a) >= 3 and not a.startswith("@"):
-                alias_map[a.lower()] = slug
-    return alias_map
+            if not a or len(a) < 3 or a.startswith("@"):
+                continue
+            # skip the bare-name alias of an ambiguous brand (governed case-sensitively)
+            if ambiguous and a.lower() == name.lower():
+                continue
+            ci_map[a.lower()] = slug
+    return ci_map, cs_patterns
 
 
-# Pre-compiled word-boundary patterns are cached per alias to avoid
-# recompiling on every ingest cycle.
+# Pre-compiled word-boundary patterns are cached to avoid recompiling per cycle.
 _ALIAS_PATTERN_CACHE: dict[str, re.Pattern] = {}
+_CS_PATTERN_CACHE: dict[str, re.Pattern] = {}
 
 
 def _alias_pattern(alias: str) -> re.Pattern:
@@ -230,20 +279,34 @@ def _alias_pattern(alias: str) -> re.Pattern:
     return pat
 
 
+def _cs_pattern(name: str) -> re.Pattern:
+    """Case-SENSITIVE word-boundary pattern matching the name as-stored OR all-caps."""
+    pat = _CS_PATTERN_CACHE.get(name)
+    if pat is None:
+        pat = re.compile(r"\b(" + re.escape(name) + "|" + re.escape(name.upper()) + r")\b")
+        _CS_PATTERN_CACHE[name] = pat
+    return pat
+
+
 def detect_entities_in_items(items: list[dict]) -> list[str]:
     """Return slugs of entities mentioned in the given feed items (alias matching).
 
-    Uses word-boundary regex to avoid substring false positives
-    (e.g. 'free' matching 'freeze', 'meta' matching 'MetaDAO').
+    Uses word-boundary regex to avoid substring false positives (e.g. 'free' matching
+    'freeze'). Single-word Titlecase/all-caps brand names are matched case-sensitively
+    so common-English-word usage ('exodus', 'flow') is not falsely tagged.
     """
-    alias_map = _load_alias_map()
-    if not alias_map:
+    ci_map, cs_patterns = _load_matchers()
+    if not ci_map and not cs_patterns:
         return []
     found: set[str] = set()
     for item in items:
-        text = _plain(item.get("content", "")).lower()
-        for alias, slug in alias_map.items():
-            if len(alias) >= 3 and _alias_pattern(alias).search(text):
+        text = _plain(item.get("content", ""))
+        low = text.lower()
+        for alias, slug in ci_map.items():
+            if len(alias) >= 3 and _alias_pattern(alias).search(low):
+                found.add(slug)
+        for pat, slug in cs_patterns:
+            if pat.search(text):
                 found.add(slug)
     return sorted(found)
 
@@ -287,9 +350,9 @@ def build_entity_context(items: list[dict],
         parts: list[str] = [name]
         if tvl_info:
             tvl = tvl_info.get("tvl_usd") or 0
-            chg = tvl_info.get("tvl_change_1d")
+            chg = tvl_info.get("tvl_change_7d")
             cat = tvl_info.get("category") or ""
-            chg_str = f" ({chg:+.1f}% 1d)" if chg is not None else ""
+            chg_str = f" ({chg:+.1f}% 7d)" if chg is not None else ""
             parts.append(f"TVL {_fmt_usd(float(tvl))}{chg_str}")
             if cat:
                 parts.append(cat)

@@ -16,6 +16,10 @@ RUN addgroup -S nodejs && adduser -S nextjs -G nodejs
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
+# Next (standalone) writes its runtime cache (ISR/fetch/image optimization) under
+# .next/cache; the COPY leaves .next owned by root, so the non-root runtime user can't
+# create it → EACCES + no response caching. Pre-create it and hand .next to nextjs.
+RUN mkdir -p .next/cache && chown -R nextjs:nodejs .next
 USER nextjs
 EXPOSE 3000
 CMD ["node", "server.js"]

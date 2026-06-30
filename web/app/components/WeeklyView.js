@@ -1,121 +1,119 @@
 "use client";
 
-import { useState, useMemo } from "react";
-import RightPanel from "./RightPanel";
-import useHeaderSearch from "../../lib/useHeaderSearch";
+import { useState, useMemo, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import EmptyState from "./ui/EmptyState";
+import ReportMasthead from "./weekly/ReportMasthead";
+import MarketSnapshot from "./weekly/MarketSnapshot";
+import ReportContents from "./weekly/ReportContents";
+import ReportSections from "./weekly/ReportSections";
+import IssueNav from "./weekly/IssueNav";
+import useSwipeNav from "../../lib/useSwipeNav";
+import {
+  fmtWeekRange, parseWeeklySections, reportModel, snapshotCells,
+  marketDek, marketTone, deDash,
+} from "../../lib/weekly";
 
-const MO = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const ROT = {
-  BTC:   { glyph: "₿", cls: "rot-btc",   label: "Bitcoin week" },
-  ETH:   { glyph: "Ξ", cls: "rot-eth",   label: "Ethereum week" },
-  ALT:   { glyph: "◈", cls: "rot-alt",   label: "Altcoin week" },
-  MIXED: { glyph: "≋", cls: "rot-mixed", label: "Mixed week" },
-};
-
-function fmtWeek(s, e) {
-  if (!s || !e) return "";
-  const [y, ms, ds] = s.split("-").map(Number);
-  const [, me, de] = e.split("-").map(Number);
-  return ms === me
-    ? `${MO[ms - 1]} ${ds}–${de}, ${y}`
-    : `${MO[ms - 1]} ${ds} – ${MO[me - 1]} ${de}, ${y}`;
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function fmtPublished(iso) {
+  if (!iso) return null;
+  const m = iso.slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  return `${MONTHS[+m[2] - 1]} ${+m[3]}, ${m[1]}`;
 }
 
-// First "Key Stories" headline (📰 section) for a one-line preview, if present.
-function previewLine(content) {
-  if (!content) return null;
-  const lines = content.split("\n").map(l => l.trim());
-  const idx = lines.findIndex(l => /^<b>📰/.test(l));
-  if (idx < 0) return null;
-  for (let i = idx + 1; i < lines.length; i++) {
-    const l = lines[i];
-    if (l.startsWith("•")) {
-      return l.slice(1).replace(/<[^>]*>/g, "").replace(/&[a-z#0-9]+;/gi, " ").trim().slice(0, 110);
-    }
-    if (/^<b>/.test(l)) break;
-  }
-  return null;
-}
+// ── Weekly Market Review — institutional research-publication frame ──────────
+// A single flowing report (masthead → market snapshot → numbered sections →
+// colophon), navigated by an in-page Contents rail + scroll-spy, with archive
+// (issue) navigation on the cover. No tabs, no right panel. defiTvl is the DB's
+// total-TVL reading (zero-egress safe), folded into the Market Snapshot.
+export default function WeeklyView({ weeklies = [], defiTvl = null }) {
+  const router = useRouter();
+  const [idx, setIdx] = useState(0); // 0 = newest = current issue
 
-function WeeklyCard({ w, selected, onSelect }) {
-  const rot = ROT[w.rotation] || ROT.MIXED;
-  const preview = useMemo(() => previewLine(w.content), [w.content]);
-  return (
-    <li
-      className={`board-card board-card--weekly${selected ? " is-selected" : ""}`}
-      role="button"
-      tabIndex={0}
-      aria-pressed={selected}
-      onClick={onSelect}
-      onKeyDown={e => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), onSelect())}
-    >
-      <div className="board-card-bar" aria-hidden />
-      <div className="board-card-main">
-        <div className="board-card-top">
-          <span className="weekly-badge">
-            <span className={`weekly-badge-glyph ${rot.cls}`} aria-hidden>{rot.glyph}</span>
-            {rot.label}
-          </span>
-        </div>
-        <h3 className="board-card-title">Week of {fmtWeek(w.week_start, w.week_end)}</h3>
-        {preview && <p className="board-card-thesis">{preview}</p>}
-        <div className="board-card-foot">
-          <span className="board-ev-total">Macro report · market · DeFi · 7-day news</span>
-        </div>
-      </div>
-    </li>
+  const selected = weeklies[idx] || null;
+
+  const sections = useMemo(
+    () => (selected ? reportModel(parseWeeklySections(selected.content)) : []),
+    [selected]
   );
-}
+  const market = useMemo(() => sections.find((s) => s.kind === "market") || null, [sections]);
+  const cells = useMemo(
+    () => snapshotCells({
+      snapshot: selected?.market_snapshot,
+      marketLines: market?.lines,
+      defiTvl,
+    }),
+    [selected, market, defiTvl]
+  );
 
-export default function WeeklyView({ weeklies = [] }) {
-  const [idx, setIdx] = useState(weeklies.length ? 0 : null);
-  const { searchProp, clearSearch } = useHeaderSearch();
+  const goto = useCallback((i) => {
+    setIdx(i);
+    document.querySelector(".feed-scroll")?.scrollTo({ top: 0 });
+  }, []);
 
-  const selected = idx != null ? (weeklies[idx] || null) : null;
-  const panelOpen = !!selected || !!searchProp;
+  const newer = idx > 0 ? idx - 1 : null;
+  const older = idx < weeklies.length - 1 ? idx + 1 : null;
+  const swipe = useSwipeNav(
+    useCallback(() => { if (newer != null) goto(newer); }, [newer, goto]),
+    useCallback(() => { if (older != null) goto(older); }, [older, goto]),
+  );
 
-  const handleClose = () => {
-    if (searchProp) clearSearch();
-    else setIdx(null);
-  };
+  const openDigest = useCallback((art) => { if (art?.date) router.push(`/d/${art.date}`); }, [router]);
 
-  return (
-    <div className="feed-grid">
-      <div className="feed-left">
-        <div className="feed-scroll">
-          <div className="view-head">
-            <div className="view-head-titles">
-              <h1 className="view-title">Weekly Macro</h1>
-              <p className="view-sub">Monday market + DeFi + 7-day narrative reports · {weeklies.length} editions</p>
-            </div>
+  if (!selected) {
+    return (
+      <div className="feed-grid feed-grid--solo">
+        <div className="feed-left">
+          <div className="feed-scroll">
+            <EmptyState variant="feed" glyph="≋">
+              No weekly issues yet.<br />The first runs Monday 07:30 UTC.
+            </EmptyState>
           </div>
-
-          {weeklies.length === 0 ? (
-            <div className="feed-empty">
-              <div className="feed-empty-glyph" aria-hidden>≋</div>
-              <p>No weekly reports yet.<br />The first runs Monday 07:30 UTC.</p>
-            </div>
-          ) : (
-            <ul className="board-list">
-              {weeklies.map((w, i) => (
-                <WeeklyCard
-                  key={w.week_start}
-                  w={w}
-                  selected={idx === i && !searchProp}
-                  onSelect={() => { setIdx(i); clearSearch(); }}
-                />
-              ))}
-            </ul>
-          )}
         </div>
       </div>
+    );
+  }
 
-      <div className={`feed-right${panelOpen ? " panel-open" : ""}`}>
-        <RightPanel
-          weekly={searchProp ? null : selected}
-          search={searchProp}
-          onClose={handleClose}
-        />
+  const dek = deDash(marketDek(market?.lines))
+    || "A seven-day review of crypto market structure, capital flows, and the narratives shaping them.";
+  const tone = marketTone(selected.rotation, market?.lines, selected.market_snapshot);
+
+  return (
+    <div className="feed-grid feed-grid--solo">
+      <div className="feed-left">
+        <div
+          className="feed-scroll"
+          onTouchStart={swipe.onTouchStart}
+          onTouchEnd={swipe.onTouchEnd}
+        >
+          {sections.length > 1 && (
+            <div className="feed-head">
+              <ReportContents sections={sections} />
+            </div>
+          )}
+
+          <article className="wr">
+            <ReportMasthead
+              title="Weekly Market Review"
+              dek={dek}
+              range={fmtWeekRange(selected.week_start, selected.week_end)}
+              published={fmtPublished(selected.created_at)}
+              tone={tone}
+              issueNav={<IssueNav weeklies={weeklies} idx={idx} onPick={goto} />}
+            />
+
+            <MarketSnapshot cells={cells} />
+
+            <ReportSections sections={sections} weekly={selected} onOpenArticle={openDigest} />
+
+            <footer className="wr-colophon">
+              Horyon · Crypto Market Intelligence<br />
+              Compiled from ~107 sources across market data, on-chain analytics, and primary reporting.
+              Figures are point-in-time; not investment advice.
+            </footer>
+          </article>
+        </div>
       </div>
     </div>
   );

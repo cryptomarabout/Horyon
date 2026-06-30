@@ -1,7 +1,14 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { stateMeta } from "../../lib/narratives";
 import { TYPE_META, avatarCandidates } from "../../lib/entityGraph";
+import { fmtTvl, fmtDayAgo, getDomain } from "../../lib/format";
+import { monogram } from "./EntityTag";
+import EmptyState from "./ui/EmptyState";
+import PanelSection from "./ui/PanelSection";
+import PanelHeader from "./ui/PanelHeader";
+import PanelBody from "./ui/PanelBody";
 
 // Avatar with a stateless fallback cascade: real logo → Twitter pic (unavatar) →
 // monogram. Walks the candidate list via a data-attr, no React state.
@@ -14,49 +21,28 @@ function AvatarImg({ node, className }) {
       src={cands[0]}
       alt=""
       data-i="0"
+      data-r="0"
+      onLoad={(e) => {
+        const mono = e.currentTarget.previousElementSibling;
+        if (mono?.classList.contains("map-avatar-mono")) mono.style.visibility = "hidden";
+      }}
       onError={(e) => {
         const el = e.currentTarget;
+        const tries = Number(el.dataset.r);
+        if (tries < 2) {
+          el.dataset.r = String(tries + 1);
+          const url = cands[Number(el.dataset.i)];
+          setTimeout(() => { el.src = `${url}${url.includes("?") ? "&" : "?"}_r=${tries + 1}`; },
+            500 * (tries + 1));
+          return;
+        }
+        el.dataset.r = "0";
         const i = Number(el.dataset.i) + 1;
         if (i < cands.length) { el.dataset.i = String(i); el.src = cands[i]; }
         else { el.style.display = "none"; }
       }}
     />
   );
-}
-
-function domainOf(url) {
-  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return null; }
-}
-const MO = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-function fmtAgo(iso) {
-  if (!iso) return null;
-  const t = Date.parse(iso);
-  if (isNaN(t)) return null;
-  const days = Math.floor((Date.now() - t) / 86400000);
-  if (days <= 0) return "today";
-  if (days === 1) return "1d ago";
-  if (days < 30) return `${days}d ago`;
-  const d = new Date(t);
-  return `${MO[d.getUTCMonth()]} ${d.getUTCDate()}`;
-}
-
-// ── Detail drawer for the entity map ────────────────────────────────────────
-// Pure presentation — all state lives in EntityGraph. Mirrors the RightPanel
-// visual system (panel-header / panel-scroll / panel-body / chips).
-
-function monogram(name) {
-  const w = (name || "?").trim().split(/\s+/);
-  if (w.length >= 2 && w[0] && w[1]) return (w[0][0] + w[1][0]).toUpperCase();
-  return (name || "?").slice(0, 2).toUpperCase();
-}
-
-function fmtTvl(usd) {
-  if (usd == null) return null;
-  if (usd >= 1e12) return `$${(usd / 1e12).toFixed(2)}T`;
-  if (usd >= 1e9)  return `$${(usd / 1e9).toFixed(1)}B`;
-  if (usd >= 1e6)  return `$${(usd / 1e6).toFixed(0)}M`;
-  if (usd > 0)     return `$${usd.toLocaleString()}`;
-  return null;
 }
 
 function Avatar({ node, big = false }) {
@@ -78,69 +64,154 @@ function NeighborChip({ n, onPick }) {
   );
 }
 
+// Live "Latest mentions" for the selected entity.
+function RecentMentions({ node }) {
+  const [state, setState] = useState({ loading: true, items: [] });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ loading: true, items: [] });
+    fetch("/api/entity-mentions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: node.name, slug: node.slug }),
+    })
+      .then((r) => (r.ok ? r.json() : { mentions: [] }))
+      .then((d) => { if (!cancelled) setState({ loading: false, items: d.mentions || [] }); })
+      .catch(() => { if (!cancelled) setState({ loading: false, items: [] }); });
+    return () => { cancelled = true; };
+  }, [node.slug, node.name]);
+
+  const { loading, items } = state;
+  return (
+    <PanelSection label="Latest Mentions" count={!loading && items.length ? items.length : null}>
+      {loading ? (
+        <p className="panel-ai-text" style={{ color: "var(--text-4)" }}>Loading recent coverage…</p>
+      ) : items.length === 0 ? (
+        <p className="panel-ai-text" style={{ color: "var(--text-4)" }}>No recent mentions in the feeds.</p>
+      ) : (
+        <EvidenceList items={items} />
+      )}
+    </PanelSection>
+  );
+}
+
+// Shared co-citation / mention evidence list (`.eg-evidence` / `.eg-evi-row`),
+// used by both the node "Latest Mentions" and the edge "Why they're linked".
+function EvidenceList({ items }) {
+  return (
+    <div className="eg-evidence">
+      {items.map((m, i) => {
+        const dom = getDomain(m.link);
+        const ago = fmtDayAgo(m.ts);
+        const Tag = m.link ? "a" : "div";
+        return (
+          <Tag key={i} className="eg-evi-row"
+            {...(m.link ? { href: m.link, target: "_blank", rel: "noreferrer" } : {})}>
+            <span className="eg-evi-snippet">{m.snippet || m.link}</span>
+            <span className="eg-evi-meta">
+              {(m.source || dom) && <span>{m.source || dom}</span>}
+              {ago && <span>· {ago}</span>}
+            </span>
+          </Tag>
+        );
+      })}
+    </div>
+  );
+}
+
+// Protocol fundamentals — the DeFiLlama metrics the map collects but the graph
+// views never surface: net flows (7d/1d), valuation (Mcap/TVL), deployment footprint.
+const fmtPct = (v) => (v == null ? null : `${v > 0 ? "+" : ""}${v.toFixed(1)}%`);
+const flowDir = (v) => (v > 0 ? "up" : v < 0 ? "dn" : "flat");
+
+function ProtocolFundamentals({ node }) {
+  const tvl = fmtTvl(node.tvl);
+  if (!tvl) return null;
+  const c7 = fmtPct(node.tvlChange7d);
+  const c1 = fmtPct(node.tvlChange1d);
+  const stats = [
+    { k: "TVL", v: tvl },
+    c7 != null && { k: "7d flow", v: c7, cls: `pl-flow-val ${flowDir(node.tvlChange7d)}` },
+    c1 != null && { k: "1d", v: c1, cls: `pl-flow-val ${flowDir(node.tvlChange1d)}` },
+    node.mcapTvl != null && node.mcapTvl > 0 && { k: "Mcap/TVL", v: node.mcapTvl.toFixed(2) },
+    node.chains?.length && { k: "Chains", v: String(node.chains.length) },
+    node.tokenSymbol && { k: "Token", v: node.tokenSymbol },
+  ].filter(Boolean);
+  return (
+    <PanelSection label="Fundamentals">
+      <div className="eg-funda">
+        {stats.map((s) => (
+          <div className="eg-funda-stat" key={s.k}>
+            <span className="eg-funda-k">{s.k}</span>
+            <span className={`eg-funda-v ${s.cls || ""}`}>{s.v}</span>
+          </div>
+        ))}
+      </div>
+      {node.chains?.length > 1 && (
+        <p className="eg-funda-chains" title="Chains this protocol is deployed on">
+          {node.chains.slice(0, 6).join(" · ")}{node.chains.length > 6 ? ` +${node.chains.length - 6}` : ""}
+        </p>
+      )}
+    </PanelSection>
+  );
+}
+
 function NodeView({ node, neighbors, onClose, onFocusEntity }) {
   const tvl = fmtTvl(node.tvl);
-  const sm = node.narrativeState ? stateMeta(node.narrativeState) : null;
+  const sm  = node.narrativeState ? stateMeta(node.narrativeState) : null;
   return (
     <>
-      <div className="panel-header">
-        <div className="panel-title-row">
-          <div style={{ display: "flex", alignItems: "center", gap: "11px", flex: 1, minWidth: 0 }}>
-            <Avatar node={node} big />
-            <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: "4px" }}>
-              <h2 className="panel-title" style={{ WebkitLineClamp: 2 }}>{node.name}</h2>
-              <div className="eg-badge-row">
-                <span className={`map-type-badge eg-badge--${node.type}`}>
-                  {TYPE_META[node.type]?.label?.replace(/s$/, "") || "Entity"}
-                </span>
-                {node.category && <span className="eg-cat">{node.category}</span>}
-              </div>
-            </div>
-          </div>
-          <button className="panel-close" onClick={onClose} aria-label="Close panel">✕</button>
-        </div>
-        <div className="map-meta-row">
-          <span className="map-meta-stat"><span className="map-meta-num">{node.mentionCount}</span> mentions</span>
-          <span className="map-meta-stat"><span className="map-meta-num">{node.degree}</span> links</span>
-          {tvl && <span className="map-meta-stat"><span className="map-meta-num">{tvl}</span> TVL</span>}
-          {sm && (
-            <span className={`eg-narr-pill eg-narr-pill--${sm.cls}`}>
-              <span aria-hidden>{sm.glyph}</span> {sm.label}
-            </span>
-          )}
-          {node.twitterHandle && (
-            <a className="panel-src-link" target="_blank" rel="noreferrer"
-              href={`https://x.com/${node.twitterHandle.replace(/^@/, "")}`}>
-              @{node.twitterHandle.replace(/^@/, "")}
-            </a>
-          )}
-        </div>
-      </div>
-
-      <div className="panel-scroll">
-        <div className="panel-body">
-          {node.summary && (
-            <div>
-              <div className="panel-section-label">Analyst Memory</div>
-              <p className="panel-ai-text">{node.summary}</p>
-            </div>
-          )}
-          <div>
-            <div className="panel-section-label">
-              Most Connected · {neighbors.length}
-            </div>
-            {neighbors.length === 0 ? (
-              <p className="panel-ai-text" style={{ color: "var(--text-4)" }}>No links at this strength.</p>
-            ) : (
-              <div className="eg-neighbors">
-                {neighbors.map((n) => (
-                  <NeighborChip key={n.slug} n={n} onPick={onFocusEntity} />
-                ))}
-              </div>
+      <PanelHeader
+        onClose={onClose}
+        below={
+          <div className="map-meta-row">
+            <span className="map-meta-stat"><span className="map-meta-num">{node.mentionCount}</span> mentions</span>
+            <span className="map-meta-stat"><span className="map-meta-num">{node.degree}</span> links</span>
+            {tvl && <span className="map-meta-stat"><span className="map-meta-num">{tvl}</span> TVL</span>}
+            {sm && (
+              <span className={`eg-narr-pill eg-narr-pill--${sm.cls}`}>
+                <span aria-hidden>{sm.glyph}</span> {sm.label}
+              </span>
+            )}
+            {node.twitterHandle && (
+              <a className="panel-src-link" target="_blank" rel="noreferrer"
+                href={`https://x.com/${node.twitterHandle.replace(/^@/, "")}`}>
+                @{node.twitterHandle.replace(/^@/, "")}
+              </a>
             )}
           </div>
+        }
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "11px", flex: 1, minWidth: 0 }}>
+          <Avatar node={node} big />
+          <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: "4px" }}>
+            <h2 className="panel-title" style={{ WebkitLineClamp: 2 }}>{node.name}</h2>
+            <div className="eg-badge-row">
+              <span className={`map-type-badge eg-badge--${node.type}`}>
+                {TYPE_META[node.type]?.label?.replace(/s$/, "") || "Entity"}
+              </span>
+              {node.category && <span className="eg-cat">{node.category}</span>}
+            </div>
+          </div>
         </div>
-      </div>
+      </PanelHeader>
+
+      <PanelBody>
+        <ProtocolFundamentals node={node} />
+        <RecentMentions node={node} />
+        <PanelSection label="Most Connected" count={neighbors.length}>
+          {neighbors.length === 0 ? (
+            <p className="panel-ai-text" style={{ color: "var(--text-4)" }}>No links at this strength.</p>
+          ) : (
+            <div className="eg-neighbors">
+              {neighbors.map((n) => (
+                <NeighborChip key={n.slug} n={n} onPick={onFocusEntity} />
+              ))}
+            </div>
+          )}
+        </PanelSection>
+      </PanelBody>
     </>
   );
 }
@@ -159,75 +230,48 @@ function EdgeView({ edge, onClose, onFocusEntity }) {
   const aff = affinityLabel(edge.npmi);
   return (
     <>
-      <div className="panel-header">
-        <div className="panel-title-row">
-          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "4px" }}>
-            <span className="pw-eyebrow">Co-citation Link</span>
-            <h2 className="panel-title">{edge.a.name} <span className="map-edge-x">×</span> {edge.b.name}</h2>
-          </div>
-          <button className="panel-close" onClick={onClose} aria-label="Close panel">✕</button>
-        </div>
-        <div className="map-meta-row">
-          <span className="map-meta-stat">
-            <span className="map-meta-num">{edge.weight}</span> co-mentions
-          </span>
-          {edge.npmi != null && (
-            <span className="eg-aff-pill" title="NPMI — how much more than chance these co-occur">
-              affinity {edge.npmi.toFixed(2)}{aff ? ` · ${aff}` : ""}
+      <PanelHeader
+        onClose={onClose}
+        below={
+          <div className="map-meta-row">
+            <span className="map-meta-stat">
+              <span className="map-meta-num">{edge.weight}</span> co-mentions
             </span>
-          )}
-        </div>
-      </div>
-      <div className="panel-scroll">
-        <div className="panel-body">
-          <div className="eg-endpoints">
-            {[edge.a, edge.b].map((e) => (
-              <button key={e.slug} type="button" className={`eg-neighbor eg-neighbor--${e.type}`}
-                onClick={() => onFocusEntity(e.slug)}>
-                <span className={`mapfilter-dot egdot--${e.type}`} aria-hidden />
-                <span className="eg-neighbor-name">{e.name}</span>
-              </button>
-            ))}
-          </div>
-
-          <div>
-            <div className="panel-section-label">Why they're linked</div>
-            {examples.length === 0 ? (
-              <p className="panel-ai-text" style={{ color: "var(--text-4)" }}>
-                No sample headlines stored for this link.
-              </p>
-            ) : (
-              <div className="eg-evidence">
-                {examples.map((ex, i) => {
-                  const dom = domainOf(ex.link);
-                  const ago = fmtAgo(ex.ts);
-                  return (
-                    <a key={i} className="eg-evi-row" href={ex.link} target="_blank" rel="noreferrer">
-                      <span className="eg-evi-snippet">{ex.snippet || ex.link}</span>
-                      <span className="eg-evi-meta">
-                        {dom && <span>{dom}</span>}
-                        {ago && <span>· {ago}</span>}
-                      </span>
-                    </a>
-                  );
-                })}
-              </div>
+            {edge.npmi != null && (
+              <span className="eg-aff-pill" title="NPMI — how much more than chance these co-occur">
+                affinity {edge.npmi.toFixed(2)}{aff ? ` · ${aff}` : ""}
+              </span>
             )}
           </div>
+        }
+      >
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "4px" }}>
+          <span className="pw-eyebrow">Co-citation Link</span>
+          <h2 className="panel-title">{edge.a.name} <span className="map-edge-x">×</span> {edge.b.name}</h2>
         </div>
-      </div>
-    </>
-  );
-}
+      </PanelHeader>
+      <PanelBody>
+        <div className="eg-endpoints">
+          {[edge.a, edge.b].map((e) => (
+            <button key={e.slug} type="button" className={`eg-neighbor eg-neighbor--${e.type}`}
+              onClick={() => onFocusEntity(e.slug)}>
+              <span className={`mapfilter-dot egdot--${e.type}`} aria-hidden />
+              <span className="eg-neighbor-name">{e.name}</span>
+            </button>
+          ))}
+        </div>
 
-function EmptyState() {
-  return (
-    <div className="panel-empty">
-      <div className="panel-empty-glyph">◉</div>
-      <p className="panel-empty-label">
-        Select an entity or a link<br />to inspect its connections
-      </p>
-    </div>
+        <PanelSection label="Why they're linked">
+          {examples.length === 0 ? (
+            <p className="panel-ai-text" style={{ color: "var(--text-4)" }}>
+              No sample headlines stored for this link.
+            </p>
+          ) : (
+            <EvidenceList items={examples} />
+          )}
+        </PanelSection>
+      </PanelBody>
+    </>
   );
 }
 
@@ -238,7 +282,7 @@ export default function EntityMapPanel({ selected, neighbors = [], onClose, onFo
   } else if (selected?.kind === "edge") {
     content = <EdgeView edge={selected.edge} onClose={onClose} onFocusEntity={onFocusEntity} />;
   } else {
-    content = <EmptyState />;
+    content = <EmptyState glyph="◉">Select an entity or a link<br />to inspect its connections</EmptyState>;
   }
 
   const animKey = selected?.kind === "node"
