@@ -21,13 +21,14 @@ import useFeedKeyboardNav from "../../lib/useFeedKeyboardNav";
 // AudioPlayer over the shared RightPanel. Search lives in useFeedSearch and
 // keyboard nav in useFeedKeyboardNav.
 //
-// projectHints are fetched client-side from /api/hints/[date] after mount so
-// they don't block the SSR critical path. Bullets render immediately; entity
-// chips pop in once the hints API responds (warm: <10ms, cold: 2-3s).
+// projectHints are now server-rendered (initialHints) so the entity/category chips are
+// in the first paint — no client round-trip, no waiting for hydration. buildProjectHints
+// is 100% DB (zero external calls) and cached per date, so it's cheap to SSR. The
+// /api/hints fallback only fires if the page didn't pass hints (defensive).
 export default function BulletFeed({
   bullets, analyses = {}, podcasts = [],
   items = [], currentDate, signalsAgo,
-  audio = null,
+  audio = null, initialHints = null,
 }) {
   const [selected, setSelected] = useState(null);
   const [panelOpen, setPanelOpen] = useState(false);
@@ -35,9 +36,11 @@ export default function BulletFeed({
   const [sortBy, setSortBy]       = useState("importance");
   const [active, setActive]       = useState({ news: true, tweets: true, podcasts: true });
   const [pendingOpen, setPendingOpen] = useState(null);
-  const [projectHints, setProjectHints] = useState([]);
+  const [projectHints, setProjectHints] = useState(initialHints ?? []);
 
   useEffect(() => {
+    // Hints came from SSR — nothing to fetch.
+    if (initialHints) { setProjectHints(initialHints); return; }
     if (!currentDate) return;
     let cancelled = false;
     fetch(`/api/hints/${currentDate}`)
@@ -45,7 +48,7 @@ export default function BulletFeed({
       .then(h => { if (h && !cancelled) setProjectHints(h); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [currentDate]);
+  }, [currentDate, initialHints]);
 
   const bulletsRef = useRef(null);
   const router = useRouter();

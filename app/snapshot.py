@@ -13,8 +13,9 @@ from __future__ import annotations
 import json
 import logging
 import time
-import urllib.request
 from datetime import datetime, timezone
+
+from . import http
 
 log = logging.getLogger(__name__)
 
@@ -60,17 +61,12 @@ query ($spaces: [String!]!) {
 
 def _graphql(query: str, variables: dict | None = None) -> dict:
     payload = json.dumps({"query": query, "variables": variables or {}}).encode()
-    req = urllib.request.Request(
+    return http.get_json(
         GRAPHQL_URL,
         data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "Horyon/1.0",
-        },
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        timeout=TIMEOUT,
     )
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        return json.loads(resp.read())
 
 
 def _get_verified_space_ids() -> list[str]:

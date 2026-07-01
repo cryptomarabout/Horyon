@@ -31,12 +31,11 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 from datetime import datetime, timezone
 
 import feedparser
 
-from . import config, db, embeddings, entities, llm, prompts
+from . import config, db, embeddings, entities, http, llm, prompts
 
 log = logging.getLogger(__name__)
 
@@ -83,9 +82,7 @@ def resolve_channel_id(handle: str) -> str | None:
     h = handle if handle.startswith("@") else "@" + handle
     url = f"https://www.youtube.com/{h}"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": _UA})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            html = resp.read().decode("utf-8", "ignore")
+        html = http.fetch(url, ua=_UA, timeout=20).body.decode("utf-8", "ignore")
     except Exception as exc:
         log.warning("channel resolve failed for %s: %s", handle, exc)
         return None

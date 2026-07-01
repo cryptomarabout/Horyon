@@ -27,7 +27,7 @@ from .protocols import (
     get_protocol_category_summary, get_protocol_tvl_movers,
 )
 from .entities import (
-    CANONICAL_ENTITY_TYPES, upsert_entity, upsert_entity_from_coingecko,
+    CANONICAL_ENTITY_TYPES, entity_generation, upsert_entity, upsert_entity_from_coingecko,
     update_entity_summary, get_all_entity_aliases, get_entities_by_slugs,
     get_governance_for_entity, touch_entity_mentions, decay_stale_entities,
     seed_entities_from_protocols, get_entity_mention_map, get_entities_for_briefing,

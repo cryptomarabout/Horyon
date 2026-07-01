@@ -7,13 +7,11 @@ Returns normalised dicts so callers never know which source was used.
 """
 from __future__ import annotations
 
-import json
 import logging
 import urllib.error
-import urllib.request
 from typing import Any
 
-from . import config
+from . import config, http
 
 log = logging.getLogger(__name__)
 TIMEOUT = 20
@@ -23,12 +21,8 @@ TIMEOUT = 20
 # HTTP helpers
 # --------------------------------------------------------------------------- #
 def _get(url: str, headers: dict | None = None) -> Any:
-    req = urllib.request.Request(
-        url, headers=headers or {"User-Agent": "Horyon/1.0"}
-    )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            return json.loads(resp.read())
+        return http.get_json(url, headers=headers, timeout=TIMEOUT)
     except urllib.error.HTTPError as exc:
         log.warning("market data HTTP %s: %s", exc.code, url)
     except Exception:

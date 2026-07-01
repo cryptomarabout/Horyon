@@ -23,11 +23,10 @@ from __future__ import annotations
 import argparse
 import logging
 import time
-import urllib.request
 from urllib.error import HTTPError
 from urllib.parse import quote
 
-from . import db
+from . import db, http
 
 log = logging.getLogger(__name__)
 
@@ -69,20 +68,14 @@ def _fetch_image(url: str) -> "tuple[bytes, str, str | None] | None":
     """Fetch one URL → (bytes, mime, etag) if it's a real, non-empty image; else None.
 
     Retries on HTTP 429 (unavatar.io rate-limit) with a back-off, honouring Retry-After."""
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
     for attempt in range(len(_RATE_LIMIT_BACKOFF) + 1):
         try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-                if resp.status != 200:
-                    return None
-                mime = (resp.headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
-                if not mime.startswith("image/"):
-                    return None
-                data = resp.read(_MAX_BYTES + 1)
-                if not data or len(data) > _MAX_BYTES:
-                    return None
-                etag = resp.headers.get("ETag")
-                return data, mime or "image/png", etag
+            resp = http.fetch(url, ua=_UA, timeout=_TIMEOUT, max_bytes=_MAX_BYTES)
+            if resp.status != 200 or not resp.content_type.startswith("image/"):
+                return None
+            if not resp.body or len(resp.body) > _MAX_BYTES:
+                return None
+            return resp.body, resp.content_type or "image/png", resp.headers.get("ETag")
         except HTTPError as exc:
             if exc.code == 429:
                 ra = exc.headers.get("Retry-After")

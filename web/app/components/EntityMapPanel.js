@@ -3,8 +3,7 @@
 import { useState, useEffect } from "react";
 import { stateMeta } from "../../lib/narratives";
 import { TYPE_META, avatarCandidates } from "../../lib/entityGraph";
-import { fmtTvl, fmtDayAgo, getDomain } from "../../lib/format";
-import { monogram } from "./EntityTag";
+import { fmtTvl, fmtDayAgo, fmtPct, getDomain, monogram } from "../../lib/format";
 import EmptyState from "./ui/EmptyState";
 import PanelSection from "./ui/PanelSection";
 import PanelHeader from "./ui/PanelHeader";
@@ -122,7 +121,6 @@ function EvidenceList({ items }) {
 
 // Protocol fundamentals — the DeFiLlama metrics the map collects but the graph
 // views never surface: net flows (7d/1d), valuation (Mcap/TVL), deployment footprint.
-const fmtPct = (v) => (v == null ? null : `${v > 0 ? "+" : ""}${v.toFixed(1)}%`);
 const flowDir = (v) => (v > 0 ? "up" : v < 0 ? "dn" : "flat");
 
 function ProtocolFundamentals({ node }) {

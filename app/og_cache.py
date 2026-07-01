@@ -16,10 +16,9 @@ from __future__ import annotations
 
 import argparse
 import logging
-import urllib.request
 from datetime import date as date_t, datetime, timezone
 
-from . import config, db
+from . import config, db, http
 
 log = logging.getLogger(__name__)
 
@@ -33,15 +32,12 @@ def _render_via_web(d: date_t) -> tuple[bytes, str]:
     """Fetch a freshly rendered card from the web container. Caller must have cleared any
     cached row first so the route doesn't hand back the stale cached bytes."""
     url = f"{config.WEB_INTERNAL_URL}/api/og?date={d.isoformat()}&type={_OG_TYPE}&bullets={_OG_BULLETS}"
-    req = urllib.request.Request(url, headers={"User-Agent": "horyon-og-warmer"})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"og render returned HTTP {resp.status}")
-        data = resp.read()
-        mime = resp.headers.get("Content-Type", "image/png").split(";")[0].strip() or "image/png"
-    if not data:
+    resp = http.fetch(url, ua="horyon-og-warmer", timeout=_TIMEOUT)
+    if resp.status != 200:
+        raise RuntimeError(f"og render returned HTTP {resp.status}")
+    if not resp.body:
         raise RuntimeError("og render returned empty body")
-    return data, mime
+    return resp.body, resp.content_type or "image/png"
 
 
 def build_og_for_date(d: date_t, persist: bool = True) -> "dict | None":

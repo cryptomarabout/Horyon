@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from datetime import datetime, timezone
 
 from . import config, db, llm, prompts
@@ -236,7 +237,7 @@ def _cs_matchable(name: str, type_: str, mention_count: int) -> bool:
             and type_ in ("protocol", "chain", "dao", "exchange", "fund"))
 
 
-def _load_matchers() -> tuple[dict[str, str], list[tuple[re.Pattern, str]]]:
+def _build_matchers() -> tuple[dict[str, str], list[tuple[re.Pattern, str]]]:
     """Build (case-insensitive alias map, case-sensitive single-word patterns).
 
     The bare lowercased name of a Titlecase/all-caps brand is kept OUT of the
@@ -264,6 +265,44 @@ def _load_matchers() -> tuple[dict[str, str], list[tuple[re.Pattern, str]]]:
                 continue
             ci_map[a.lower()] = slug
     return ci_map, cs_patterns
+
+
+# ── Matcher cache ─────────────────────────────────────────────────────────────
+# detect_entities_in_* is called dozens of times per digest run (once per bullet in
+# bullet-analysis, once per covered-bullet title in _saturated_entities, plus threads +
+# briefing). Each call used to re-query the whole entity_memory table and recompile the
+# full matcher — pure redundant work. The (ci_map, cs_patterns) pair is now cached
+# process-wide and rebuilt only when entity_memory changes: db.entity_generation() bumps
+# on every entity write in THIS process, so the digest's own writes (ingest upserts) are
+# reflected exactly. (A manual `entity_audit merge`/`dealias` runs in a separate CLI
+# process; the bot's cache then self-heals on the next ingest upsert — minutes, always
+# before the daily digest. Rebuild narratives/entity_graph after such edits anyway.)
+# Guarded by a lock because bullet analysis runs the detector 3-wide.
+_MATCHER_LOCK = threading.Lock()
+_MATCHER_CACHE: dict | None = None   # {"gen": int, "ci_map": ..., "cs_patterns": ...}
+
+
+def _reset_matcher_cache() -> None:
+    """Drop the cached matcher. Used by tests that swap the mocked DB between calls."""
+    global _MATCHER_CACHE
+    with _MATCHER_LOCK:
+        _MATCHER_CACHE = None
+
+
+def _load_matchers() -> tuple[dict[str, str], list[tuple[re.Pattern, str]]]:
+    """Return the compiled matcher, rebuilding it only when entity_memory has changed."""
+    global _MATCHER_CACHE
+    gen = db.entity_generation()
+    cached = _MATCHER_CACHE
+    if cached is not None and cached["gen"] == gen:
+        return cached["ci_map"], cached["cs_patterns"]
+    with _MATCHER_LOCK:
+        cached = _MATCHER_CACHE
+        if cached is None or cached["gen"] != gen:
+            ci_map, cs_patterns = _build_matchers()
+            cached = {"gen": gen, "ci_map": ci_map, "cs_patterns": cs_patterns}
+            _MATCHER_CACHE = cached
+        return cached["ci_map"], cached["cs_patterns"]
 
 
 # Pre-compiled word-boundary patterns are cached to avoid recompiling per cycle.

@@ -58,6 +58,21 @@ export function fmtWeekRange(start, end) {
   return `${MONTHS_SHORT[s.m - 1]} ${s.d} – ${MONTHS_SHORT[e.m - 1]} ${e.d}, ${s.y}`;
 }
 
+// Signed percent: "+1.2%" / "-3.4%". Returns null for nullish input so callers
+// pick their own placeholder (`fmtPct(v) ?? "—"`).
+export function fmtPct(v) {
+  if (v == null) return null;
+  return `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
+}
+
+// 1–2 letter initials — shared monogram fallback for every entity avatar
+// (chips, map nodes, league rows).
+export function monogram(name) {
+  const w = (name || "?").trim().split(/\s+/).filter(Boolean);
+  if (w.length >= 2 && w[0] && w[1]) return (w[0][0] + w[1][0]).toUpperCase();
+  return (name || "?").slice(0, 2).toUpperCase();
+}
+
 // Hostname from URL, strips www prefix.
 export function getDomain(url) {
   if (!url) return null;

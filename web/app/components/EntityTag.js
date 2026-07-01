@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { monogram } from "../../lib/format";
+
+export { monogram };
 
 // Strip trailing version suffixes so "Aave V3" displays as "Aave".
 export function baseName(name) {
@@ -8,13 +11,6 @@ export function baseName(name) {
     .replace(/\s+v?\d+(\.\d+)*$/i, "")
     .replace(/\s*\(v?\d+(\.\d+)*\)$/i, "")
     .trim();
-}
-
-// 1–2 letter initials — shared monogram fallback for all entity avatars.
-export function monogram(name) {
-  const w = (name || "?").trim().split(/\s+/).filter(Boolean);
-  if (w.length >= 2 && w[0] && w[1]) return (w[0][0] + w[1][0]).toUpperCase();
-  return (name || "?").slice(0, 2).toUpperCase();
 }
 
 // Renders avatar cascading through `avatars` URLs; final fallback is a type-coloured monogram.

@@ -17,6 +17,27 @@ _ERC_RE = __import__("re").compile(
 )
 
 
+# ── Matcher-cache invalidation ────────────────────────────────────────────────
+# app.entities caches its compiled alias matcher process-wide (a full entity_memory
+# read + regex recompile) and rebuilds it only when this token changes. INVARIANT:
+# every function in this module that writes entity_memory bumps the generation, so a
+# cached matcher can never be stale. Cheap monotonic int; single bot process.
+_ENTITY_GENERATION = 0
+
+
+def _bump_entity_generation() -> None:
+    global _ENTITY_GENERATION
+    _ENTITY_GENERATION += 1
+
+
+def entity_generation() -> int:
+    """Monotonic token that increments on every entity_memory write.
+
+    app.entities keys its cached matcher on this so detect_entities_* doesn't
+    re-query entity_memory on every call (dozens per digest run)."""
+    return _ENTITY_GENERATION
+
+
 # Curated entity-type corrections. The LLM extractor (and CoinGecko / feed seeds)
 # repeatedly misclassify a handful of well-known entities — e.g. tagging a Layer-1
 # blockchain as a "protocol", or a regulated exchange as a "dao". Because upsert
@@ -63,6 +84,7 @@ def upsert_entity(slug: str, name: str, type_: str, aliases: list[str],
         """,
         (slug, name, type_, aliases, last_mentioned, twitter_handle),
     )
+    _bump_entity_generation()
 
 
 def upsert_entity_from_coingecko(slug: str, name: str, type_: str,
@@ -89,6 +111,7 @@ def upsert_entity_from_coingecko(slug: str, name: str, type_: str,
         """,
         (slug, name, type_, aliases, logo_url),
     )
+    _bump_entity_generation()
 
 
 def update_entity_summary(slug: str, summary: str) -> None:
@@ -157,6 +180,7 @@ def touch_entity_mentions(slugs: list[str], mention_date: "date_t") -> None:
            WHERE slug = ANY(%s)""",
         (mention_date, slugs),
     )
+    _bump_entity_generation()
 
 
 def update_digest_mention_counts(counts: "dict[str, int]") -> int:
@@ -179,7 +203,8 @@ def update_digest_mention_counts(counts: "dict[str, int]") -> int:
                 "FROM (VALUES %s) AS v(slug, n) WHERE e.slug = v.slug",
                 items,
             )
-        return len(items)
+    _bump_entity_generation()
+    return len(items)
 
 
 def decay_stale_entities() -> int:
@@ -211,12 +236,13 @@ def decay_stale_entities() -> int:
                  AND mention_count <= 2"""
         )
         pruned = cur.rowcount
-        return decayed + pruned
+    _bump_entity_generation()
+    return decayed + pruned
 
 
 def seed_entities_from_protocols() -> int:
     """One-time seed of entity_memory from defillama_protocols. Skips existing slugs."""
-    return _execute(
+    n = _execute(
         """
         INSERT INTO entity_memory (slug, name, type, aliases, updated_at)
         SELECT
@@ -232,6 +258,8 @@ def seed_entities_from_protocols() -> int:
         WHERE slug NOT IN (SELECT slug FROM entity_memory)
         """
     )
+    _bump_entity_generation()
+    return n
 
 
 def get_entity_mention_map() -> list[tuple]:

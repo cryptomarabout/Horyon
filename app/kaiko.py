@@ -32,11 +32,10 @@ import json
 import logging
 import re
 import time
-import urllib.request
 from html import unescape
 from urllib.parse import urlparse
 
-from . import config, db, entities, ingest
+from . import config, db, entities, http, ingest
 
 log = logging.getLogger(__name__)
 
@@ -97,10 +96,7 @@ def _unescape(s) -> str:
 def _get(url: str, timeout: int = 25) -> str | None:
     """Fetch one URL as text. Never raises — returns None on any transport error."""
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": _UA})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            charset = resp.headers.get_content_charset() or "utf-8"
-            return resp.read().decode(charset, "ignore")
+        return http.get_text(url, ua=_UA, timeout=timeout)
     except Exception as exc:
         log.warning("kaiko fetch failed: %s (%s)", url, str(exc)[:160])
         return None

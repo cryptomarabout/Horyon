@@ -228,3 +228,41 @@ def test_detect_returns_sorted():
         from app.entities import detect_entities_in_items
         result = detect_entities_in_items([{"content": "Uniswap and Aave integrate"}])
     assert result == sorted(result)
+
+
+# ── matcher cache (keyed on db.entity_generation) ────────────────────────────
+
+def test_matcher_cache_reused_until_generation_bumps():
+    """entity_memory is read once and the matcher reused while the generation is stable;
+    a bump (any entity write) rebuilds it."""
+    from app import entities
+    entities._reset_matcher_cache()
+    rows = [_make_entity_row("uniswap", "Uniswap", "protocol", ["uniswap"], 50)]
+    with patch("app.entities.db") as mock_db:
+        mock_db.get_all_entity_aliases.return_value = rows
+        mock_db.entity_generation.return_value = 7
+        entities.detect_entities_in_text("Uniswap ships v4")
+        entities.detect_entities_in_text("more on Uniswap")
+        assert mock_db.get_all_entity_aliases.call_count == 1   # cached across calls
+        mock_db.entity_generation.return_value = 8              # an entity write bumped it
+        entities.detect_entities_in_text("Uniswap again")
+        assert mock_db.get_all_entity_aliases.call_count == 2   # rebuilt
+
+
+def test_matcher_cache_invalidation_reflects_new_entities():
+    """After a generation bump the matcher sees newly-added entities."""
+    from app import entities
+    entities._reset_matcher_cache()
+    with patch("app.entities.db") as mock_db:
+        mock_db.entity_generation.return_value = 1
+        mock_db.get_all_entity_aliases.return_value = [
+            _make_entity_row("uniswap", "Uniswap", "protocol", ["uniswap"], 50),
+        ]
+        assert entities.detect_entities_in_text("Aave and Uniswap") == ["uniswap"]
+        # Aave gets upserted → generation bumps → next detect must pick it up.
+        mock_db.entity_generation.return_value = 2
+        mock_db.get_all_entity_aliases.return_value = [
+            _make_entity_row("uniswap", "Uniswap", "protocol", ["uniswap"], 50),
+            _make_entity_row("aave", "Aave", "protocol", ["aave"], 50),
+        ]
+        assert entities.detect_entities_in_text("Aave and Uniswap") == ["aave", "uniswap"]

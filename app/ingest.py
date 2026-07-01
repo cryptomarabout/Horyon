@@ -34,8 +34,20 @@ _BOILERPLATE_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# UTM and tracking query params to strip for dedup normalisation.
-_UTM_PARAM_RE = re.compile(r"(^|&)(utm_[^&=]+=?[^&]*|ref=[^&]*|source=[^&]*&?)", re.IGNORECASE)
+# Tracking / analytics query params to strip during dedup normalisation, so the same
+# article shared with different tracking suffixes dedupes to one row. Matched EXACTLY
+# (plus the utm_ prefix) — a prior `startswith(("ref", "source"))` also ate legitimate
+# params like `sourceToken=USDC` / `reference=0x…`, collapsing genuinely different pages
+# into one and silently dropping the second as a duplicate.
+_TRACKING_PARAMS = frozenset({
+    "ref", "source", "fbclid", "gclid", "gclsrc", "dclid",
+    "mc_cid", "mc_eid", "igshid", "spm", "cmpid",
+})
+
+
+def _is_tracking_param(key: str) -> bool:
+    k = key.lower()
+    return k.startswith("utm_") or k in _TRACKING_PARAMS
 
 
 def _normalize_url(url: str) -> str:
@@ -49,8 +61,7 @@ def _normalize_url(url: str) -> str:
         # Strip UTM + ref tracking params; preserve other params
         if p.query:
             qs = parse_qs(p.query, keep_blank_values=True)
-            clean_qs = {k: v for k, v in qs.items()
-                        if not k.lower().startswith(("utm_", "ref", "source"))}
+            clean_qs = {k: v for k, v in qs.items() if not _is_tracking_param(k)}
             query = urlencode(clean_qs, doseq=True)
         else:
             query = ""

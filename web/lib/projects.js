@@ -1,24 +1,22 @@
 import { unstable_cache } from "next/cache";
-import { searchProjectInfo, searchEntityMemory } from "./db";
+import { searchProjectInfo, searchEntityMemory, getChainDirectory } from "./db";
 
-// Fetch project hints for every bullet at SSR time.
-// All DB queries run in parallel; chain API and price API each fire once.
+// Build project hints for every bullet — 100% from our own Postgres, ZERO per-request
+// external calls (the web container's zero-egress rule). Protocols/categories/entities
+// come from defillama_protocols + entity_memory; the chain roster comes from entity_memory
+// (~79 chains) via getChainDirectory, so EVERY tracked chain — not just the 6 we snapshot
+// TVL for — gets its icons.llamao.fi chip logo. Live token price is intentionally gone —
+// the panel price line self-hides when absent.
 async function _buildProjectHints(bullets) {
   if (!bullets.length) return [];
 
-  // One chain list call, cached 30 min by Next.js fetch cache
+  // Full chain name universe from our own DB (entity_memory), TVL-then-coverage ranked.
+  // The chip logo is a deterministic icons.llamao.fi URL built from the name, so no live
+  // api.llama.fi chain-list call is needed to restore broad chain-logo coverage.
   let rankedChains = [];
   try {
-    const resp = await fetch("https://api.llama.fi/v2/chains", {
-      next: { revalidate: 1800 },
-    });
-    if (resp.ok) {
-      const all = await resp.json();
-      rankedChains = [...all]
-        .sort((a, b) => (b.tvl || 0) - (a.tvl || 0))
-        .slice(0, 100)
-        .map((c, i) => ({ ...c, rank: i + 1 }));
-    }
+    const dir = await getChainDirectory();
+    rankedChains = dir.map((c, i) => ({ name: c.name, tvl: c.tvl_usd ?? null, rank: i + 1 }));
   } catch {}
 
   // Search text: title + first 80 chars of body gives entity signal without bloating the query.
@@ -32,33 +30,10 @@ async function _buildProjectHints(bullets) {
     Promise.all(searchTexts.map(t => searchEntityMemory(t).catch(() => []))),
   ]);
 
-  // One batch price call for all unique gecko_ids across all bullets
-  const allProtocols = protocolResults.flatMap(r => r.protocols || []);
-  const geckoIds = [...new Set(
-    allProtocols.filter(p => p.gecko_id).map(p => p.gecko_id)
-  )];
-  let priceMap = {};
-  if (geckoIds.length) {
-    try {
-      const coins = geckoIds.map(id => `coingecko:${id}`).join(",");
-      const resp = await fetch(
-        `https://coins.llama.fi/prices/current/${coins}`,
-        { next: { revalidate: 300 } }
-      );
-      if (resp.ok) {
-        const data = await resp.json();
-        priceMap = data.coins || {};
-      }
-    } catch {}
-  }
-
   return bullets.map((b, i) => {
-    const protocols = (protocolResults[i].protocols || []).map(p => ({
-      ...p,
-      price: p.gecko_id
-        ? (priceMap[`coingecko:${p.gecko_id}`]?.price ?? null)
-        : null,
-    }));
+    // No live price enrichment — defillama_protocols rows carry no `price`, so the panel's
+    // `fmtPrice(p.price)` guard simply hides the price line (see BulletPanel).
+    const protocols = protocolResults[i].protocols || [];
 
     const chains = rankedChains
       .filter(c => {
@@ -74,7 +49,7 @@ async function _buildProjectHints(bullets) {
         name: c.name,
         tvl: c.tvl ?? null,
         rank: c.rank,
-        tokenSymbol: c.tokenSymbol || null,
+        tokenSymbol: null,
         logo: `https://icons.llamao.fi/icons/chains/rsz_${c.name.toLowerCase()}.jpg`,
         url: `https://defillama.com/chain/${encodeURIComponent(c.name)}`,
       }));

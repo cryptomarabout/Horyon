@@ -17,6 +17,9 @@ function fmtPrice(usd) {
   return `$${usd.toFixed(5)}`;
 }
 
+// Hide a logo/image that fails to load rather than showing a broken-image glyph.
+const hideOnError = (e) => { e.currentTarget.style.visibility = "hidden"; };
+
 // ── Chain distribution from chain_tvls JSONB ───────────────────────────────
 function computeChainDist(chainTvls) {
   if (!chainTvls || typeof chainTvls !== "object") return [];
@@ -48,7 +51,7 @@ function ProtocolCard({ p }) {
       <div className="panel-proto-top">
         {p.logo_url ? (
           <img src={p.logo_url} alt={p.name} className="panel-proto-logo"
-            onError={e => { e.currentTarget.style.visibility = "hidden"; }} />
+            onError={hideOnError} />
         ) : (
           <div className="panel-proto-logo" />
         )}
@@ -83,7 +86,7 @@ function ProtocolCard({ p }) {
             <div key={c.name} className="chain-dist-row">
               <div className="chain-dist-info">
                 <img src={chainLogoUrl(c.name)} alt={c.name} className="chain-dist-logo"
-                  onError={e => { e.currentTarget.style.visibility = "hidden"; }} />
+                  onError={hideOnError} />
                 <span className="chain-dist-name">{c.name}</span>
                 <span className="chain-dist-tvl">{fmtTvl(c.tvl)}</span>
                 <span className="chain-dist-pct">{c.pct.toFixed(1)}%</span>
@@ -104,7 +107,7 @@ function ChainCard({ chain }) {
   return (
     <div className="panel-chain-card">
       <img src={chainLogoUrl(chain.name)} alt={chain.name} className="panel-chain-logo"
-        onError={e => { e.currentTarget.style.visibility = "hidden"; }} />
+        onError={hideOnError} />
       <div className="panel-chain-info">
         <div className="panel-chain-name">{chain.name}</div>
         {chain.rank && <div className="panel-chain-rank">Rank #{chain.rank}</div>}

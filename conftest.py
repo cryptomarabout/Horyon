@@ -35,3 +35,16 @@ def patch_db():
 
     for p in reversed(started):
         p.stop()
+
+
+@pytest.fixture(autouse=True)
+def _reset_entity_matcher_cache():
+    """The entity matcher is cached process-wide (keyed on db.entity_generation()).
+
+    Reset it before every test so a test's mocked entity_memory is never served from a
+    cache a previous test populated — tests swap the whole `db` mock without bumping the
+    real generation counter.
+    """
+    from app import entities
+    entities._reset_matcher_cache()
+    yield

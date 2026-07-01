@@ -3,7 +3,7 @@
 import { useState, useMemo } from "react";
 import { avatarCandidates, monogram, TYPE_META } from "../../../lib/entityGraph";
 import { trajectoryMeta } from "../../../lib/narratives";
-import { fmtTvl } from "../../../lib/format";
+import { fmtTvl, fmtPct } from "../../../lib/format";
 
 // ── Entity league — the Atlas "Index" screener ───────────────────────────────
 // A ranked, sortable table of ALL tracked entities (not just protocols): coverage
@@ -11,9 +11,6 @@ import { fmtTvl } from "../../../lib/format";
 // TVL/flows (aggregated to the brand server-side) layer on where they exist. Rows are
 // node-shaped, so a click reuses the shared entity detail panel. The type filter is
 // the same `active` map the Board/Network use (shared TypeChips in the toolbar).
-
-const fmtPct = (v) =>
-  v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
 
 // Compact avatar (logo → twitter → monogram) mirroring the panel cascade.
 function LeagueAvatar({ node }) {
@@ -209,7 +206,7 @@ export default function EntityLeague({ entities = [], query = "", active = null,
                           <span className="pl-tvl-val">{fmtTvl(p.tvl)}</span>
                           {p.tvlChange7d != null && (
                             <span className={`pl-tvl-d7 pl-tvl-d7--${d7dir(p.tvlChange7d)}`}>
-                              {fmtPct(p.tvlChange7d)}
+                              {fmtPct(p.tvlChange7d) ?? "—"}
                             </span>
                           )}
                         </span>

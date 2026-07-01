@@ -7,13 +7,11 @@ Jobs:
 from __future__ import annotations
 
 import datetime
-import json
 import logging
 import time
 import urllib.error
-import urllib.request
 
-from . import db
+from . import db, http
 
 log = logging.getLogger(__name__)
 
@@ -36,9 +34,7 @@ PROTOCOL_TOP_N = 1000
 def _get(path: str) -> list | dict | None:
     url = BASE_URL + path
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Horyon/1.0"})
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            return json.loads(resp.read())
+        return http.get_json(url, timeout=TIMEOUT)
     except urllib.error.HTTPError as exc:
         if exc.code == 402:
             log.warning("defillama %s → HTTP 402 (endpoint requires a paid DeFiLlama plan)", path)
@@ -172,9 +168,7 @@ COINGECKO_TOP_N = 500
 def _cg_get(path: str) -> list | dict | None:
     url = _CG_BASE + path
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Horyon/1.0"})
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            return json.loads(resp.read())
+        return http.get_json(url, timeout=TIMEOUT)
     except Exception:
         log.exception("coingecko fetch failed: %s", path)
     return None

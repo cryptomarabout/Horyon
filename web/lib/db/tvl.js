@@ -41,6 +41,35 @@ function brandAliasValues() {
 }
 
 
+// Directory of every tracked chain (from entity_memory, our own DB), each with its latest
+// defillama_tvl reading where we snapshot it (only ~6 chains) — else null. Used by
+// buildProjectHints to attach chain chips + logos to daily bullets WITHOUT a live
+// api.llama.fi call: the chip logo is the deterministic icons.llamao.fi URL built from the
+// chain name, so we only need the name universe (broad) + optional TVL. Cached 1h — the
+// chain roster barely moves. Ordered TVL-first then by coverage so the ranking mirrors the
+// old TVL-sorted llama.fi list for the tracked chains.
+export const getChainDirectory = unstable_cache(
+  async () =>
+    safeRows(
+      `SELECT e.name,
+              e.logo_url,
+              t.tvl_usd::float8 AS tvl_usd
+       FROM entity_memory e
+       LEFT JOIN LATERAL (
+         SELECT tvl_usd
+         FROM defillama_tvl
+         WHERE lower(chain) = lower(e.name) AND chain <> 'total'
+         ORDER BY date DESC
+         LIMIT 1
+       ) t ON true
+       WHERE e.type = 'chain' AND e.mention_count >= 2
+       ORDER BY t.tvl_usd DESC NULLS LAST, e.mention_count DESC`
+    ),
+  ["horyon-chain-directory"],
+  { revalidate: 3600 }
+);
+
+
 // Latest TVL snapshot per chain from defillama_tvl, sorted total-first then tvl desc.
 export async function getTvlSnapshot() {
   const rows = await safeRows(

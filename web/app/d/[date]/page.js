@@ -2,6 +2,7 @@ import { Suspense, cache } from "react";
 import { notFound } from "next/navigation";
 import { getDigest, getBulletAnalyses, getBulletTimes, listDigests, getPodcastsForDate, getAudioBriefing } from "../../../lib/db";
 import { parseDigest, timeAgo, sourceLabel, isValidDigestDate } from "../../../lib/digest";
+import { buildProjectHints } from "../../../lib/projects";
 import BulletFeed from "../../components/BulletFeed";
 import FeedSkeleton from "../../components/FeedSkeleton";
 
@@ -105,11 +106,13 @@ async function DigestFeed({ date }) {
 
   const { bullets } = parseDigest(row.content);
 
-  // Wave 2: only what needs the parsed bullet list (links for pub-date lookup).
-  // buildProjectHints is NOT awaited — BulletFeed fetches /api/hints/[date]
-  // client-side after mount so the N*2 regex scans + DeFiLlama API calls
-  // never block the initial render.
-  const bulletTimes = await getBulletTimes(bullets.map(b => b.link));
+  // Wave 2: needs the parsed bullet list. buildProjectHints is now 100% DB (zero external
+  // calls) + cached per date, so we await it here and SSR the entity/category chips into
+  // the first paint instead of the old client fetch that made chips pop in after hydration.
+  const [bulletTimes, hints] = await Promise.all([
+    getBulletTimes(bullets.map(b => b.link)),
+    buildProjectHints(row.date, bullets),
+  ]);
 
   const enrichedBullets = bullets.map(b => ({
     title: b.title, body: b.body, hack: b.hack,
@@ -126,6 +129,7 @@ async function DigestFeed({ date }) {
       currentDate={row.date}
       signalsAgo={timeAgo(row.created_at)}
       audio={audio}
+      initialHints={hints}
     />
   );
 }

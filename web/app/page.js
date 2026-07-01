@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import { getLatestDigest, getBulletAnalyses, getBulletTimes, listDigests, getPodcastsForDate, getAudioBriefing, latestDate } from "../lib/db";
 import { parseDigest, timeAgo, sourceLabel } from "../lib/digest";
+import { buildProjectHints } from "../lib/projects";
 import BulletFeed from "./components/BulletFeed";
 import FeedSkeleton from "./components/FeedSkeleton";
 
@@ -48,23 +49,23 @@ export default function Home() {
 }
 
 async function HomeFeed() {
-  // Wave 1: digest + all date-keyed data in parallel. buildProjectHints is NOT
-  // awaited here — BulletFeed fetches /api/hints/[date] client-side after mount
-  // so the ~3s cold-cache cost (DeFiLlama API + N*2 regex scans) never blocks
-  // the initial render. Bullets appear as soon as these fast DB queries complete.
+  // Wave 1: digest + date list. Project hints (entity/category chips) are built in wave 2
+  // once we have the parsed bullets — see below.
   const [row, items] = await Promise.all([getLatestDigest(), listDigests()]);
   if (!row) return <div className="empty">No digests yet. Check back after the next run.</div>;
 
   const d = row.date;
   const { bullets } = parseDigest(row.content);
 
-  // Wave 2: only what needs the parsed bullet list (links for pub-date lookup).
-  // getBulletAnalyses/podcasts/audio are also included here since they need d.
-  const [bulletAnalyses, bulletTimes, podcasts, audio] = await Promise.all([
+  // Wave 2: everything that needs the parsed bullet list. buildProjectHints is now 100% DB
+  // (zero external calls) + cached per date, so the entity/category chips are SSR'd into the
+  // first paint rather than fetched client-side after hydration.
+  const [bulletAnalyses, bulletTimes, podcasts, audio, hints] = await Promise.all([
     getBulletAnalyses(d),
     getBulletTimes(bullets.map(b => b.link)),
     getPodcastsForDate(d),
     getAudioBriefing(d),
+    buildProjectHints(d, bullets),
   ]);
 
   const enrichedBullets = bullets.map(b => ({
@@ -82,6 +83,7 @@ async function HomeFeed() {
       currentDate={row.date}
       signalsAgo={timeAgo(row.created_at)}
       audio={audio}
+      initialHints={hints}
     />
   );
 }

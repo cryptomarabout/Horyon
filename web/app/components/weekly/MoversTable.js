@@ -1,9 +1,9 @@
 // Movers league table — one compact block, gainers and losers on the SAME row.
 // Each rank is a single line: rank · top gainer (left) · top loser (right). A faint
 // proportional fill behind each cell conveys magnitude without adding height.
-const TOP_N = 5;
+import { fmtPct } from "../../../lib/format";
 
-const fmtPct = (t) => `${t.pct > 0 ? "+" : ""}${t.pct.toFixed(1)}%`;
+const TOP_N = 5;
 
 function Cell({ t, dir, maxAbs }) {
   if (!t) return <span className="wr-mv-cell is-empty" />;
@@ -12,7 +12,7 @@ function Cell({ t, dir, maxAbs }) {
     <div className={`wr-mv-cell ${dir}`}>
       <i className={`wr-mv-fill ${dir}`} style={{ width: `${w}%` }} aria-hidden="true" />
       <span className="wr-mv-sym">{t.sym}</span>
-      <span className={`wr-mv-pct ${dir}`}>{fmtPct(t)}</span>
+      <span className={`wr-mv-pct ${dir}`}>{fmtPct(t.pct)}</span>
     </div>
   );
 }

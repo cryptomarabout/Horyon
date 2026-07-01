@@ -45,11 +45,7 @@ export function radiusFor(mc, minMc, maxMc, cap, rMin = R_MIN, rMax = R_MAX) {
   return cap == null ? r : Math.max(6, Math.min(r, cap));
 }
 
-export function monogram(name) {
-  const w = (name || "?").trim().split(/\s+/);
-  if (w.length >= 2 && w[0] && w[1]) return (w[0][0] + w[1][0]).toUpperCase();
-  return (name || "?").slice(0, 2).toUpperCase();
-}
+export { monogram } from "./format.js";
 
 export const edgeKey = (s, t) => (s < t ? `${s}|${t}` : `${t}|${s}`);
 export const safeId = (s) => `egclip-${String(s).replace(/[^a-z0-9_-]/gi, "_")}`;
