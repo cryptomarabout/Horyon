@@ -9,9 +9,11 @@ export default function useHeaderSearch() {
   const [state,  setState]  = useState("idle");
   const [result, setResult] = useState("");
   const [sources, setSources] = useState(0);
+  const [asOf, setAsOf] = useState(null);
+  const [facts, setFacts] = useState(null);
 
   const run = useCallback(async (kw) => {
-    setQuery(kw); setState("loading"); setResult(""); setSources(0);
+    setQuery(kw); setState("loading"); setResult(""); setSources(0); setAsOf(null); setFacts(null);
     document.dispatchEvent(new CustomEvent("horyon:search-loading"));
     try {
       const r = await fetch("/api/search", {
@@ -21,7 +23,13 @@ export default function useHeaderSearch() {
       });
       const data = await r.json();
       if (!r.ok) { setResult(data.error || "Search failed."); setState("error"); }
-      else { setResult(data.content || "No results."); setSources(data.sources ?? 0); setState("done"); }
+      else {
+        setResult(data.content || "No results.");
+        setSources(data.sources ?? 0);
+        setAsOf(data.cached ? (data.asOf ?? null) : null);
+        setFacts(data.facts ?? null);
+        setState("done");
+      }
     } catch {
       setResult("Could not reach search service."); setState("error");
     } finally {
@@ -30,7 +38,7 @@ export default function useHeaderSearch() {
   }, []);
 
   const clear = useCallback(() => {
-    setQuery(""); setState("idle"); setResult(""); setSources(0);
+    setQuery(""); setState("idle"); setResult(""); setSources(0); setAsOf(null); setFacts(null);
     document.dispatchEvent(new CustomEvent("horyon:clear-input"));
   }, []);
 
@@ -46,7 +54,7 @@ export default function useHeaderSearch() {
   }, [run, clear]);
 
   const searchProp = query
-    ? { keyword: query, state, result, sources, onClose: clear }
+    ? { keyword: query, state, result, sources, asOf, facts, onClose: clear }
     : null;
 
   return { searchProp, clearSearch: clear };

@@ -28,10 +28,6 @@ from . import config, db, llm, prompts
 
 log = logging.getLogger(__name__)
 
-# Reasoning-model leak guard (same failure mode handled in podcasts/entity_brief).
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-_THINK_OPEN_RE = re.compile(r"<think>.*\Z", re.DOTALL | re.IGNORECASE)
-
 # Char budgets. X's hard limit is 280; a wrapped t.co link costs 23 chars + 1 space, so a
 # body tweet that gets a link appended must leave room for it.
 HOOK_MAX = 270          # no link on the hook (the OG image attaches there)
@@ -56,12 +52,6 @@ def _dedash(text: str) -> str:
     text = _DASH_NUM_RE.sub("-", text or "")
     text = _DASH_SEP_RE.sub(", ", text)
     return re.sub(r"\s+", " ", text).strip()
-
-
-def _strip_think(text: str) -> str:
-    text = _THINK_RE.sub("", text or "")
-    text = _THINK_OPEN_RE.sub("", text)
-    return text.strip()
 
 
 def _clip(text: str, limit: int) -> str:
@@ -415,7 +405,7 @@ def _generate_tweets(date_str: str, bullets: list[dict]) -> tuple[str, dict[int,
         log.warning("thread: LLM call failed; using deterministic fallback", exc_info=True)
         return "", {}, ""
 
-    content = _strip_think(content)
+    content = llm.strip_think(content)
     try:
         data = llm.parse_json_loose(content)
     except Exception:
@@ -434,9 +424,9 @@ def _generate_tweets(date_str: str, bullets: list[dict]) -> tuple[str, dict[int,
             i = int(it.get("i"))
         except (TypeError, ValueError):
             continue
-        text = _strip_think(str(it.get("text", "")))
+        text = llm.strip_think(str(it.get("text", "")))
         if text:  # validated + fit later in _compose_brief_tweet (needs the allow-list)
-            by_idx[i] = {"text": text, "why": _strip_think(str(it.get("why", "")))}
+            by_idx[i] = {"text": text, "why": llm.strip_think(str(it.get("why", "")))}
     return hook, by_idx, model
 
 

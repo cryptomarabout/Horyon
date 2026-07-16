@@ -14,11 +14,17 @@ export default function useMediaSession({ date, variant, hasChapters, chaps, aud
       const d = new Date(date + "T12:00:00Z");
       dateLabel = d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
     } catch {}
+    // Lock-screen artwork: the day's precomputed OG card (per-date, bot-rendered — no
+    // per-request egress), with square app icons as fallbacks for OSes that want a square.
     navigator.mediaSession.metadata = new MediaMetadata({
       title: `Horyon ${VARIANT_LABELS[variant] || "Briefing"} · ${dateLabel}`,
       artist: "Horyon",
       album: "Crypto Intelligence",
-      artwork: [{ src: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+      artwork: [
+        { src: `/api/og?date=${date}`, sizes: "1200x628", type: "image/png" },
+        { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+        { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      ],
     });
   }, [date, variant]);
 

@@ -35,20 +35,18 @@ from datetime import datetime, timezone
 
 import feedparser
 
-from . import config, db, embeddings, entities, http, llm, prompts
+from . import config, db, embeddings, entities, http, llm, prompts, util
 
 log = logging.getLogger(__name__)
 
 _UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 _RSS = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
 _FENCE_RE = re.compile(r"```[a-z]*\n?", re.IGNORECASE)
-_TAG_RE = re.compile(r"<[^>]+>")
 
 # Reasoning / instruction-echo cleanup for map output. Reasoning models sometimes
 # emit their chain-of-thought (or an echo of the prompt) instead of the asked-for
-# '- ' bullets — that prose must never reach the reduce step or a stored field.
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-_THINK_OPEN_RE = re.compile(r"<think>.*\Z", re.DOTALL | re.IGNORECASE)  # unclosed → drop to end
+# '- ' bullets — that prose must never reach the reduce step or a stored field
+# (<think> blocks are stripped via llm.strip_think).
 _BULLET_RE = re.compile(r"^\s*[-*•]\s+(.+)$")
 _META_RE = re.compile(
     r"(we need to extract|the user asks?|must be terse|terse bullets|"
@@ -197,7 +195,7 @@ def _parse_vtt(raw: str) -> str:
             continue
         if re.match(r"^(Kind|Language):", line):
             continue
-        line = _TAG_RE.sub("", line).strip()  # inline <00:00:00.000><c> tags
+        line = util.TAG_RE.sub("", line).strip()  # inline <00:00:00.000><c> tags
         if line and (not out or out[-1] != line):
             out.append(line)
     return re.sub(r"\s+", " ", " ".join(out)).strip()
@@ -286,7 +284,7 @@ def _clean_map_note(content: str) -> str:
     """
     if not content:
         return ""
-    text = _THINK_OPEN_RE.sub("", _THINK_RE.sub("", content))
+    text = llm.strip_think(content)
     bullets: list[str] = []
     for line in text.splitlines():
         m = _BULLET_RE.match(line)
@@ -302,7 +300,7 @@ def _parse_analysis(raw: str, fallback_notes: list[str]) -> dict:
     """Parse the reduce JSON; degrade gracefully so we never infinitely retry."""
     data: dict = {}
     try:
-        parsed = llm.parse_json_loose(_THINK_RE.sub("", raw or ""))
+        parsed = llm.parse_json_loose(llm.strip_think(raw))
         if isinstance(parsed, dict):
             data = parsed
     except (ValueError, TypeError):
@@ -422,8 +420,90 @@ def process_episode(ep: dict) -> bool:
     except Exception:
         log.debug("podcast entity extraction failed (non-fatal)", exc_info=True)
 
+    try:
+        _store_predictions(ep, analysis)
+    except Exception:
+        log.debug("podcast prediction store failed (non-fatal)", exc_info=True)
+
     log.info("podcast summarized: %r (%s, model=%s)", ep.get("title", "")[:60], vid, model)
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Prediction follow-through (T14) — deterministic, zero new LLM paths
+# --------------------------------------------------------------------------- #
+def _store_predictions(ep: dict, analysis: dict) -> None:
+    """Persist each extracted prediction with its resolved entity slugs, for the later
+    coverage recheck. Entities are resolved with the shared, vetted detector (the claim
+    text plus the episode's entity list), so matching later reuses one definition of
+    'this bullet is about entity X'."""
+    preds = [p for p in (analysis.get("predictions") or []) if (p or "").strip()]
+    if not preds:
+        return
+    ep_entities = " ".join(analysis.get("entities") or [])
+    rows = []
+    for claim in preds:
+        slugs = entities.detect_entities_in_text(f"{claim} {ep_entities}")
+        rows.append({"claim": claim.strip(), "entities": slugs})
+    n = db.insert_podcast_predictions(
+        ep["video_id"], ep.get("channel", ""), ep.get("published_at"), rows)
+    if n:
+        log.info("podcast: stored %d prediction(s) for %s", n, ep["video_id"])
+
+
+def recheck_predictions() -> dict:
+    """Monthly deterministic pass: for each open prediction old enough to have played
+    out, look for LATER digest coverage that word-boundary-matches its entities. Mark
+    'corroborated' (with evidence) when found, 'stale' once the window elapses with no
+    coverage. NO LLM — this never judges whether the call was right, only whether the
+    system has since covered what the prediction named. Returns stats."""
+    open_preds = db.get_open_predictions(config.PODCAST_PREDICTION_MIN_AGE_DAYS)
+    corroborated = stale = 0
+    for p in open_preds:
+        slugs = p.get("entities") or []
+        if isinstance(slugs, str):
+            slugs = json.loads(slugs or "[]")
+        predicted = p.get("predicted_at") or p.get("created_at")
+        since = predicted.date() if hasattr(predicted, "date") else predicted
+
+        evidence: list[dict] = []
+        if slugs:
+            terms = _matchable_terms_for_slugs(slugs)
+            if terms and since is not None:
+                bullets = db.get_digest_bullets_matching_since(terms, since, limit=3)
+                evidence = [{"date": str(b["digest_date"]), "title": b["title"]}
+                            for b in bullets]
+
+        if evidence:
+            db.update_prediction_outcome(p["id"], "corroborated", evidence)
+            corroborated += 1
+        elif _prediction_is_stale(predicted):
+            db.update_prediction_outcome(p["id"], "stale", [])
+            stale += 1
+    stats = {"checked": len(open_preds), "corroborated": corroborated, "stale": stale}
+    log.info("podcast prediction recheck: %s", stats)
+    return stats
+
+
+def _matchable_terms_for_slugs(slugs: list[str]) -> list[str]:
+    """Entity display names for the given slugs, filtered through the shared
+    matchable_term gate so a generic-word entity can't match half the corpus."""
+    terms: list[str] = []
+    try:
+        for ent in db.get_entities_by_slugs(slugs):
+            name = (ent.get("name") or "").strip()
+            if name and entities.matchable_term(name):
+                terms.append(name)
+    except Exception:
+        log.debug("prediction term resolution failed", exc_info=True)
+    return terms
+
+
+def _prediction_is_stale(predicted) -> bool:
+    if not predicted:
+        return False
+    age = datetime.now(timezone.utc) - util.as_utc(predicted)
+    return age.days >= config.PODCAST_PREDICTION_STALE_DAYS
 
 
 def run_once(persist: bool = True, max_episodes: int | None = None) -> dict:
@@ -473,9 +553,13 @@ if __name__ == "__main__":
     ap.add_argument("--no-persist", action="store_true",
                     help="Discover + summarize the first usable episode, print JSON, write nothing")
     ap.add_argument("--limit", type=int, default=None, help="Max episodes to process this run")
+    ap.add_argument("--recheck-predictions", action="store_true",
+                    help="Run the deterministic prediction follow-through pass and exit")
     args = ap.parse_args()
 
-    if args.resolve:
+    if args.recheck_predictions:
+        print(recheck_predictions())
+    elif args.resolve:
         print(resolve_channel_id(args.resolve) or "NOT FOUND")
     elif args.no_persist:
         eps = discover_episodes()

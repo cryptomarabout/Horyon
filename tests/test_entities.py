@@ -1,7 +1,7 @@
 """Tests for app.entities pure-logic functions.
 
-Covers matchable_term(), _fmt_usd(), _plain(), and the single-word
-ambiguity detection helpers — all zero-DB pure functions.
+Covers matchable_term() and the single-word ambiguity detection helpers — all
+zero-DB pure functions (_fmt_usd/_plain moved to app.util; see tests/test_util.py).
 The DB-dependent detector (detect_entities_in_items) is tested with a
 mocked db so no live Postgres connection is required.
 """
@@ -14,8 +14,6 @@ from app.entities import (
     GENERIC_TERMS,
     _ambiguous_single_word,
     _cs_matchable,
-    _fmt_usd,
-    _plain,
     matchable_term,
 )
 
@@ -70,58 +68,6 @@ def test_matchable_short_wrong_type():
 def test_matchable_generic_terms_superset_of_blocked():
     # Every BLOCKED_ALIASES term should also be in GENERIC_TERMS
     assert BLOCKED_ALIASES.issubset(GENERIC_TERMS)
-
-
-# ── _fmt_usd ─────────────────────────────────────────────────────────────────
-
-def test_fmt_usd_trillions():
-    assert _fmt_usd(2.5e12) == "$2.50T"
-
-
-def test_fmt_usd_billions():
-    assert _fmt_usd(3.7e9) == "$3.7B"
-
-
-def test_fmt_usd_millions():
-    assert _fmt_usd(150e6) == "$150M"
-
-
-def test_fmt_usd_small():
-    assert _fmt_usd(50_000) == "$50,000"
-
-
-def test_fmt_usd_billion_boundary():
-    # exactly 1B
-    assert _fmt_usd(1e9) == "$1.0B"
-
-
-# ── _plain ───────────────────────────────────────────────────────────────────
-
-def test_plain_strips_html_tags():
-    result = _plain("<b>Bold</b> and <i>italic</i>")
-    assert "<b>" not in result
-    assert "Bold" in result
-    assert "italic" in result
-
-
-def test_plain_collapses_whitespace():
-    result = _plain("hello   \t   world")
-    assert result == "hello world"
-
-
-def test_plain_respects_limit():
-    text = "a" * 500
-    assert len(_plain(text, limit=100)) == 100
-
-
-def test_plain_default_limit_300():
-    text = "a" * 400
-    assert len(_plain(text)) == 300
-
-
-def test_plain_empty():
-    assert _plain("") == ""
-    assert _plain(None) == ""
 
 
 # ── _ambiguous_single_word ───────────────────────────────────────────────────

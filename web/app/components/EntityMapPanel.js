@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { stateMeta } from "../../lib/narratives";
 import { TYPE_META, avatarCandidates } from "../../lib/entityGraph";
-import { fmtTvl, fmtDayAgo, fmtPct, getDomain, monogram } from "../../lib/format";
+import { fmtTvl, fmtPrice, fmtDayAgo, fmtPct, getDomain, monogram } from "../../lib/format";
 import EmptyState from "./ui/EmptyState";
 import PanelSection from "./ui/PanelSection";
 import PanelHeader from "./ui/PanelHeader";
@@ -125,14 +125,29 @@ const flowDir = (v) => (v > 0 ? "up" : v < 0 ? "dn" : "flat");
 
 function ProtocolFundamentals({ node }) {
   const tvl = fmtTvl(node.tvl);
-  if (!tvl) return null;
+  const mcap = fmtTvl(node.marketCap);
+  if (!tvl && !mcap) return null;
   const c7 = fmtPct(node.tvlChange7d);
   const c1 = fmtPct(node.tvlChange1d);
+  // CoinGecko market data (price/mcap/FDV/supply) — joined by gecko_id == slug, so
+  // only ever populated for entities whose slug happens to equal their CoinGecko id
+  // (see coingecko_market's schema comment). Absent for the rest, same as TVL above.
+  const price = fmtPrice(node.price);
+  const fdv = fmtTvl(node.fdv);
+  const priceChg7 = fmtPct(node.priceChange7d);
+  const circPct = (node.circulatingSupply && node.totalSupply)
+    ? Math.round((node.circulatingSupply / node.totalSupply) * 100)
+    : null;
   const stats = [
-    { k: "TVL", v: tvl },
+    price && { k: "Price", v: price },
+    mcap && { k: "Mcap", v: mcap },
+    priceChg7 != null && { k: "Price 7d", v: priceChg7, cls: `pl-flow-val ${flowDir(node.priceChange7d)}` },
+    fdv && { k: "FDV", v: fdv },
+    tvl && { k: "TVL", v: tvl },
     c7 != null && { k: "7d flow", v: c7, cls: `pl-flow-val ${flowDir(node.tvlChange7d)}` },
     c1 != null && { k: "1d", v: c1, cls: `pl-flow-val ${flowDir(node.tvlChange1d)}` },
     node.mcapTvl != null && node.mcapTvl > 0 && { k: "Mcap/TVL", v: node.mcapTvl.toFixed(2) },
+    circPct != null && { k: "Circulating", v: `${circPct}%` },
     node.chains?.length && { k: "Chains", v: String(node.chains.length) },
     node.tokenSymbol && { k: "Token", v: node.tokenSymbol },
   ].filter(Boolean);

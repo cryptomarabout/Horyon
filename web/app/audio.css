@@ -415,7 +415,8 @@
   background: var(--accent-dim);
   color: var(--accent);
 }
-.audio-chapter-open {
+.audio-chapter-open,
+.audio-chapter-link {
   flex: 0 0 auto;
   display: grid;
   place-items: center;
@@ -431,8 +432,14 @@
   transition: opacity var(--t), border-color var(--t), color var(--t);
   flex-shrink: 0;
 }
-.audio-chapter-row:hover .audio-chapter-open { opacity: 1; }
-.audio-chapter-open:hover { border-color: var(--accent); color: var(--accent); }
+.audio-chapter-row:hover .audio-chapter-open,
+.audio-chapter-row:hover .audio-chapter-link { opacity: 1; }
+.audio-chapter-open:hover,
+.audio-chapter-link:hover { border-color: var(--accent); color: var(--accent); }
+/* Keep the deep-link affordance discoverable on touch (no hover). */
+@media (hover: none) {
+  .audio-chapter-link { opacity: 0.6; }
+}
 
 /* ── Mobile: tidy 2-row layout ───────────────────────────────────────────────
    Row 1: transport (skip · play · skip) on the left, secondary cluster right.

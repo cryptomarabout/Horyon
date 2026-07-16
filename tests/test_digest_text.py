@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.digest import (
     _build_dedup_context,
+    _clean_analysis,
     _clean_text,
     _count_bullets,
     _decode,
@@ -135,6 +136,36 @@ def test_format_items_joins_with_separator():
     assert "\n\n---\n\n" in _format_items(rows)
 
 
+# ── _format_items quality_flag annotations ───────────────────────────────────
+# Thin/boilerplate items stay in the prompt but carry a NOTE the model can act on —
+# padding a bullet out of a 60-char teaser is the main confabulation vector.
+
+def test_format_items_annotates_thin_content():
+    rows = [{"content": "x" * 60, "source_type": "news", "link": "", "creator": "",
+             "quality_flag": "thin_content"}]
+    out = _format_items(rows)
+    assert "NOTE: LOW-DETAIL SOURCE" in out
+
+
+def test_format_items_annotates_boilerplate_title():
+    rows = [{"content": "x" * 60, "source_type": "news", "link": "", "creator": "",
+             "quality_flag": "boilerplate_title"}]
+    out = _format_items(rows)
+    assert "NOTE: NEWSLETTER/ROUNDUP" in out
+
+
+def test_format_items_no_note_for_ok_or_missing_flag():
+    rows = [
+        {"content": "x" * 60, "source_type": "news", "link": "", "creator": "",
+         "quality_flag": "ok"},
+        {"content": "y" * 60, "source_type": "news", "link": "", "creator": ""},
+        # nitter_handle_title: the title never reaches the prompt, content is substantive
+        {"content": "z" * 60, "source_type": "twitter", "link": "", "creator": "",
+         "quality_flag": "nitter_handle_title"},
+    ]
+    assert "NOTE:" not in _format_items(rows)
+
+
 # ── _is_cache_fresh ──────────────────────────────────────────────────────────
 
 def test_cache_fresh_recent_run():
@@ -196,6 +227,51 @@ def test_count_bullets():
     assert _count_bullets("") == 0
 
 
+# ── _clean_analysis (2026-07-03 incident: per-bullet analyst had NO reasoning-leak guard at
+# all, unlike every other LLM write-path — app/audit.py's retrospective scan found it already
+# live in 14/347 stored analyses since 2026-06-04) ───────────────────────────────────────────
+
+# A verbatim (trimmed) fragment from one of the 14 contaminated rows found in production
+# (2026-07-01 · 'Phantom hires Ventuals team'): the model narrated BULLET_ANALYST_SYSTEM's own
+# instructions instead of writing the analysis.
+_LEAKED_ANALYSIS = (
+    "We need to produce 3-4 sentences of additional context: background on the project/event, "
+    "using only info present in headline, summary, and context blocks. No invented numbers. "
+    "We can mention TVL $5M and that it's down 83.9% 7d? That is the ONLY source for specific "
+    "numbers. So we can include those numbers. However we must not invent others."
+)
+
+_REAL_ANALYSIS = (
+    "Ventuals lets traders take leveraged positions on pre-IPO company valuations without "
+    "owning the underlying equity, filling a gap for retail exposure to private markets. "
+    "Phantom's move signals wallets are becoming distribution channels for niche derivatives "
+    "products, not just custody. Watch whether liquidity holds once the initial listing hype fades."
+)
+
+
+def test_clean_analysis_rejects_leaked_planning():
+    assert _clean_analysis(_LEAKED_ANALYSIS) == ""
+
+
+def test_clean_analysis_keeps_real_analysis_untouched():
+    assert _clean_analysis(_REAL_ANALYSIS) == _REAL_ANALYSIS
+
+
+def test_clean_analysis_strips_think_tags():
+    wrapped = f"<think>internal deliberation, ignore</think>{_REAL_ANALYSIS}"
+    assert _clean_analysis(wrapped) == _REAL_ANALYSIS
+
+
+def test_clean_analysis_strips_unclosed_think_tag():
+    wrapped = f"<think>internal deliberation that never closes... {_REAL_ANALYSIS}"
+    assert _clean_analysis(wrapped) == ""  # nothing usable survives an unclosed think block
+
+
+def test_clean_analysis_empty_input():
+    assert _clean_analysis("") == ""
+    assert _clean_analysis(None) == ""
+
+
 # ── validate_digest_output ───────────────────────────────────────────────────
 
 def _five_bullets(extra: str = "") -> str:
@@ -236,3 +312,42 @@ def test_validate_flags_duplicate_titles():
 def test_validate_flags_empty_body():
     errs = validate_digest_output(_five_bullets("• <b>Bodyless</b> — "))
     assert any("empty bullet body" in e for e in errs)
+
+
+# ── _strip_foreign_hrefs: deterministic anti-injection/hallucination href allowlist ──
+from app.digest import _strip_foreign_hrefs, _norm_link  # noqa: E402
+
+
+def test_strip_foreign_hrefs_keeps_legit_source_link():
+    allowed = {"https://x.com/eigenlayer/status/1944556677889900112"}
+    body = ('• <b>EigenLayer slashing</b> — $12M slashed. '
+            '<a href="https://x.com/eigenlayer/status/1944556677889900112#m">🔗</a>')
+    out = _strip_foreign_hrefs(body, allowed)
+    assert out == body  # #m fragment tolerated by _norm_link, link kept
+
+
+def test_strip_foreign_hrefs_unwraps_planted_link_keeping_text():
+    # link-swap injection: model cited an attacker URL not in the input source set
+    allowed = {"https://x.com/eigenlayer/status/1944556677889900112"}
+    body = '• <b>Story</b> — body. <a href="https://better-source.example/verified">source</a>'
+    out = _strip_foreign_hrefs(body, allowed)
+    assert "better-source.example" not in out
+    assert "<a " not in out
+    assert "source" in out  # anchor text preserved
+
+
+def test_strip_foreign_hrefs_unwraps_hallucinated_canonical_url():
+    allowed = {"https://theblock.co/post/1"}
+    body = '• <b>Aave</b> — TVL up. <a href="https://defillama.com/protocol/aave">🔗</a>'
+    out = _strip_foreign_hrefs(body, allowed)
+    assert "defillama.com" not in out
+    assert "🔗" in out
+
+
+def test_strip_foreign_hrefs_empty_allowlist_strips_all_links():
+    body = '• <b>X</b> — y. <a href="https://anything.example">z</a>'
+    assert "<a " not in _strip_foreign_hrefs(body, set())
+
+
+def test_norm_link_ignores_fragment_and_trailing_slash():
+    assert _norm_link("https://X.com/a/#m") == _norm_link("https://x.com/a")

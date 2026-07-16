@@ -8,7 +8,10 @@ import MarketSnapshot from "./weekly/MarketSnapshot";
 import ReportContents from "./weekly/ReportContents";
 import ReportSections from "./weekly/ReportSections";
 import IssueNav from "./weekly/IssueNav";
+import SearchPanel from "./panels/SearchPanel";
+import useHeaderSearch from "../../lib/useHeaderSearch";
 import useSwipeNav from "../../lib/useSwipeNav";
+import useMobilePanelBack from "../../lib/useMobilePanelBack";
 import {
   fmtWeekRange, parseWeeklySections, reportModel, snapshotCells,
   marketDek, marketTone, deDash,
@@ -30,6 +33,13 @@ function fmtPublished(iso) {
 export default function WeeklyView({ weeklies = [], defiTvl = null }) {
   const router = useRouter();
   const [idx, setIdx] = useState(0); // 0 = newest = current issue
+
+  // Global header search (NavSearch) works on every route — see useHeaderSearch.
+  // Weekly is deliberately a single flowing report with no right panel (see the
+  // module note above), so the panel appears ONLY while a search is active and
+  // the report keeps its full-width "solo" layout the rest of the time.
+  const { searchProp, clearSearch } = useHeaderSearch();
+  useMobilePanelBack(!!searchProp, clearSearch);
 
   const selected = weeklies[idx] || null;
 
@@ -63,7 +73,7 @@ export default function WeeklyView({ weeklies = [], defiTvl = null }) {
 
   if (!selected) {
     return (
-      <div className="feed-grid feed-grid--solo">
+      <div className={`feed-grid${searchProp ? "" : " feed-grid--solo"}`}>
         <div className="feed-left">
           <div className="feed-scroll">
             <EmptyState variant="feed" glyph="≋">
@@ -71,6 +81,11 @@ export default function WeeklyView({ weeklies = [], defiTvl = null }) {
             </EmptyState>
           </div>
         </div>
+        {searchProp && (
+          <div className="feed-right panel-open">
+            <SearchPanel search={searchProp} />
+          </div>
+        )}
       </div>
     );
   }
@@ -80,7 +95,7 @@ export default function WeeklyView({ weeklies = [], defiTvl = null }) {
   const tone = marketTone(selected.rotation, market?.lines, selected.market_snapshot);
 
   return (
-    <div className="feed-grid feed-grid--solo">
+    <div className={`feed-grid${searchProp ? "" : " feed-grid--solo"}`}>
       <div className="feed-left">
         <div
           className="feed-scroll"
@@ -115,6 +130,11 @@ export default function WeeklyView({ weeklies = [], defiTvl = null }) {
           </article>
         </div>
       </div>
+      {searchProp && (
+        <div className="feed-right panel-open">
+          <SearchPanel search={searchProp} />
+        </div>
+      )}
     </div>
   );
 }

@@ -2,16 +2,13 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 
-from . import analyst, db, entities, llm, memory, prompts
+from . import analyst, db, entities, llm, memory, prompts, util
 from .telegram_html import sanitize
 
 log = logging.getLogger(__name__)
 
-_TAG_RE = re.compile(r"<[^>]*>")
-_WS_RE = re.compile(r"\s+")
 
 SEARCH_FEED_TOOL = {
     "type": "function",
@@ -36,11 +33,6 @@ SEARCH_FEED_TOOL = {
 }
 
 
-def _plain(text: str, limit: int = 400) -> str:
-    text = _WS_RE.sub(" ", _TAG_RE.sub(" ", text or "")).strip()
-    return text[:limit]
-
-
 def _format_results(rows: list[dict]) -> str:
     if not rows:
         return "No matching feed items in the last 30 days."
@@ -49,7 +41,7 @@ def _format_results(rows: list[dict]) -> str:
         when = r["pub_date"].date().isoformat() if r.get("pub_date") else "?"
         lines.append(
             f"[{r.get('source_type', '?')}] {r.get('creator', '')} ({when})\n"
-            f"{_plain(r.get('content', ''))}\n"
+            f"{util.plain_text(r.get('content', ''), 400)}\n"
             f"LINK: {r.get('link', '')}"
         )
     return "\n\n---\n\n".join(lines)
@@ -100,9 +92,9 @@ def run_specialized(keyword_or_text: str, chat_id: str | int) -> str:
     try:
         notes_ctx = analyst.format_analyst_notes()
         if notes_ctx:
-            context_parts.append(
-                f"ANALYST NOTES — ongoing themes (last 7 days):\n{notes_ctx}"
-            )
+            # Shared provenance label — the notes are prior MODEL output, and the agent
+            # must not launder them into an answer as verified source facts.
+            context_parts.append(f"{prompts.ANALYST_NOTES_LABEL}\n{notes_ctx}")
     except Exception:
         log.debug("could not load analyst notes for agent", exc_info=True)
 

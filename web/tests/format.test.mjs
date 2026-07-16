@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  fmtTvl, fmtAgo, fmtShortDate, fmtDayAgo, fmtWeekRange, getDomain,
+  fmtTvl, fmtPrice, fmtAgo, fmtShortDate, fmtDayAgo, fmtWeekRange, getDomain,
 } from "../lib/format.js";
 
 // ── fmtTvl ──────────────────────────────────────────────────────────────────
@@ -17,6 +17,22 @@ test("fmtTvl returns null for nullish or non-positive", () => {
   assert.equal(fmtTvl(undefined), null);
   assert.equal(fmtTvl(0), null);
   assert.equal(fmtTvl(-5), null);
+});
+
+// ── fmtPrice ────────────────────────────────────────────────────────────────
+test("fmtPrice uses 2 decimals at or above a dollar", () => {
+  assert.equal(fmtPrice(150.5), "$150.50");
+  assert.equal(fmtPrice(1), "$1.00");
+});
+
+test("fmtPrice uses significant figures below a dollar", () => {
+  // A sub-cent altcoin price rounded to 2dp would print as $0.00 — useless.
+  assert.equal(fmtPrice(0.0001234), "$0.0001234");
+});
+
+test("fmtPrice returns null for nullish input", () => {
+  assert.equal(fmtPrice(null), null);
+  assert.equal(fmtPrice(undefined), null);
 });
 
 // ── fmtAgo ──────────────────────────────────────────────────────────────────

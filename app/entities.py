@@ -13,12 +13,10 @@ import re
 import threading
 from datetime import datetime, timezone
 
-from . import config, db, llm, prompts
+from . import config, db, llm, prompts, util
 
 log = logging.getLogger(__name__)
 
-_TAG_RE = re.compile(r"<[^>]*>")
-_WS_RE = re.compile(r"\s+")
 _JSON_FENCE_RE = re.compile(r"```[a-z]*\n?", re.IGNORECASE)
 
 _ERC_RE = re.compile(r"^(ERC|EIP|BIP|CIP|AIP|SIP|RIP)-\d+$", re.IGNORECASE)
@@ -46,6 +44,17 @@ GENERIC_TERMS = BLOCKED_ALIASES | {
     "minting", "vesting", "unlock", "unlocks", "fork", "mainnet", "incentive",
     "incentives", "reward", "rewards", "fund", "labs", "ventures", "foundation",
     "exchange", "wrapped", "native", "core", "main", "new", "open", "world",
+    "onchain",
+    # "notional" follows the across/strategy/public precedent: Notional-the-protocol
+    # is unreachable behind derivatives coverage ("$80B notional volume") — the bare
+    # word OR-matched half the corpus in scoring corroboration (2026-07-01).
+    "notional",
+    # "loan"/"loans" — generic word for what a lending protocol DOES, not a brand
+    # identity (unlike "lending"/"borrow"/"borrowing" already above, this one was
+    # missed and sat as a false-positive-prone alias on both LiquidLoans and MetalX
+    # Lending — neither is "the" owner of the word, so dealias's dominance check
+    # (needs a single entity to clearly own it) can't strip it either).
+    "loan", "loans",
     # Common English words that are ALSO entity names — matching the bare word
     # floods the graph ("Across" protocol matched "across" 254×, "Strategy",
     # "Public"). The entity stays reachable via a distinctive alias/ticker if it
@@ -92,18 +101,30 @@ def matchable_term(term: str, type_: str | None = None, mention_count: int = 0) 
 
 
 
-def _plain(text: str, limit: int = 300) -> str:
-    return _WS_RE.sub(" ", _TAG_RE.sub(" ", text or "")).strip()[:limit]
+# ── Corpus prose gate (extraction-time prevention) ───────────────────────────
+# The curated GENERIC_TERMS list can never enumerate every common word the LLM
+# will mint as a junk entity ("would", "zero", "time", "cash", …). Instead of
+# growing the list after each audit, a NEW entity's bare single-word identity is
+# checked against the project's OWN feed corpus: if the word already appears in
+# ≥40 documents (or is an English stopword the tsquery parser drops entirely),
+# it is ordinary prose, not a distinctive brand — refuse to mint the entity.
+# Existing entities are never re-judged (their corpus frequency IS coverage).
+_PROSE_HITS_MIN = 40  # mirrors app.audit._COLLISION_MIN_HITS
+_PROSE_CACHE: dict[str, bool] = {}
 
 
-def _fmt_usd(usd: float) -> str:
-    if usd >= 1e12:
-        return f"${usd / 1e12:.2f}T"
-    if usd >= 1e9:
-        return f"${usd / 1e9:.1f}B"
-    if usd >= 1e6:
-        return f"${usd / 1e6:.0f}M"
-    return f"${usd:,.0f}"
+def _common_prose_word(term: str) -> bool:
+    """True when a bare single alphabetic token reads as ordinary prose in the
+    feed corpus (or is an English stopword) — not a distinctive brand identity."""
+    t = (term or "").strip().lower()
+    if not t or " " in t or not t.isalpha() or len(t) > 10:
+        return False
+    cached = _PROSE_CACHE.get(t)
+    if cached is None:
+        n = db.prose_doc_count(t, cap=_PROSE_HITS_MIN)
+        cached = n is None or n >= _PROSE_HITS_MIN
+        _PROSE_CACHE[t] = cached
+    return cached
 
 
 # --------------------------------------------------------------------------- #
@@ -125,7 +146,7 @@ def extract_and_upsert_entities(items: list[dict]) -> int:
     for it in sorted_items[:60]:
         if not it.get("content"):
             continue
-        snippet = _plain(it.get("content", ""), 250)
+        snippet = util.plain_text(it.get("content", ""), 250)
         # Append @mentions parsed at ingest time so the LLM can directly map
         # entity names to their Twitter handles (e.g. "Aave → @AaveAave").
         mentions = [m for m in (it.get("mentions") or []) if m.startswith("@")][:5]
@@ -196,6 +217,22 @@ def extract_and_upsert_entities(items: list[dict]) -> int:
         if not filtered_aliases:
             continue
 
+        # NEW entities only: refuse to mint one whose identity is ordinary prose in
+        # our own corpus (the "would"/"zero"/"time" class the curated list can't
+        # enumerate). Existing entities are exempt — their frequency IS coverage.
+        try:
+            is_new = not db.get_entities_by_slugs([slug])
+        except Exception:
+            is_new = False
+        if is_new:
+            if " " not in name and _common_prose_word(name):
+                log.info("entity extraction: skipped common-prose entity %r (%s)", name, slug)
+                continue
+            filtered_aliases = [a for a in filtered_aliases if not _common_prose_word(a)]
+            if not filtered_aliases:
+                log.info("entity extraction: skipped %r — only common-prose aliases", slug)
+                continue
+
         try:
             db.upsert_entity(slug, name, type_, filtered_aliases,
                              last_mentioned=today, twitter_handle=twitter_handle)
@@ -248,22 +285,34 @@ def _build_matchers() -> tuple[dict[str, str], list[tuple[re.Pattern, str]]]:
     ci_map: dict[str, str] = {}
     cs_patterns: list[tuple[re.Pattern, str]] = []
     for slug, name, type_, aliases, _summary, mention_count in rows:
+        mc = mention_count or 0
         ambiguous = _ambiguous_single_word(name)
-        if ambiguous and _cs_matchable(name, type_, mention_count or 0):
+        if ambiguous and _cs_matchable(name, type_, mc):
             cs_patterns.append((_cs_pattern(name), slug))
         if not ambiguous:
             # For ambiguous brands neither the slug nor the bare name may match
             # case-insensitively (the slug ≈ the lowercased common word) — only the
             # case-sensitive pattern above. The web matcher likewise never uses the slug.
-            ci_map[slug.lower()] = slug
-            ci_map[name.lower()] = slug
+            # Name/slug go through the SAME matchable_term gate as aliases: extraction
+            # noise named a bare common word ("would", "zero", "stake") used to enter
+            # the case-insensitive map ungated and tag every text containing the word.
+            # Multi-word names always pass (the gate only rejects bare single tokens).
+            if " " in slug or matchable_term(slug, type_, mc):
+                ci_map[slug.lower()] = slug
+            if " " in name or matchable_term(name, type_, mc):
+                ci_map[name.lower()] = slug
         for a in (aliases or []):
-            if not a or len(a) < 3 or a.startswith("@"):
+            if not a or a.startswith("@"):
                 continue
             # skip the bare-name alias of an ambiguous brand (governed case-sensitively)
             if ambiguous and a.lower() == name.lower():
                 continue
-            ci_map[a.lower()] = slug
+            # Multi-word aliases are distinctive enough as-is; bare single tokens must
+            # clear the shared matchable_term gate (length floors + GENERIC_TERMS).
+            if " " in a.strip() and len(a) >= 3:
+                ci_map[a.lower()] = slug
+            elif matchable_term(a, type_, mc):
+                ci_map[a.lower()] = slug
     return ci_map, cs_patterns
 
 
@@ -339,7 +388,7 @@ def detect_entities_in_items(items: list[dict]) -> list[str]:
         return []
     found: set[str] = set()
     for item in items:
-        text = _plain(item.get("content", ""))
+        text = util.plain_text(item.get("content", ""), 300)
         low = text.lower()
         for alias, slug in ci_map.items():
             if len(alias) >= 3 and _alias_pattern(alias).search(low):
@@ -392,17 +441,26 @@ def build_entity_context(items: list[dict],
             chg = tvl_info.get("tvl_change_7d")
             cat = tvl_info.get("category") or ""
             chg_str = f" ({chg:+.1f}% 7d)" if chg is not None else ""
-            parts.append(f"TVL {_fmt_usd(float(tvl))}{chg_str}")
+            parts.append(f"TVL {util.fmt_usd(float(tvl))}{chg_str}")
             if cat:
                 parts.append(cat)
         if summary:
-            parts.append(summary)
+            # entity_memory.summary is written by the analyst-extraction LLM pass —
+            # earlier model output, not source data. Label it so the receiving prompt
+            # can't launder a prior guess into today's digest as verified background.
+            parts.append(f"state (unverified prior note): {summary}")
 
         lines.append("  " + " | ".join(parts))
 
     if not lines:
         return ""
-    return "ENTITY CONTEXT (auto-detected from today's feed):\n" + "\n".join(lines)
+    return (
+        "ENTITY CONTEXT (auto-detected from today's feed). TVL figures are live "
+        "DeFiLlama data — verified. Any 'state (unverified prior note)' is Horyon's "
+        "own earlier MODEL-GENERATED summary: background hint only — never quote its "
+        "figures, dates, or events as fact, and never report it as today's news.\n"
+        + "\n".join(lines)
+    )
 
 
 def build_entity_context_for_query(query: str) -> str:

@@ -1,5 +1,7 @@
 // app/lib/db/entities.js — entity matching/search, intel briefs, entity resolution
+import { unstable_cache } from "next/cache";
 import { pool, safeRows, iso } from "./_core.js";
+import { TAG_STOPWORDS } from "../tagStopwords.js";
 
 
 // Entity names that are ALSO common English words: matching the bare token floods the
@@ -88,6 +90,9 @@ export async function getEntityRecentMentions(name, slug, { days = 45, limit = 8
 
 // Pre-computed entity intel brief — returns fresh row (within 7 days) or null.
 // Checks by canonical name first, then falls back to alias lookup via entity_memory.
+// Carries the resolved entity's `slug` (best-effort join, null if no exact name match)
+// so callers can pull structured facts (TVL/market data) alongside the brief text —
+// see getEntityFacts in lib/db/tvl.js.
 export async function getEntityIntelBrief(query) {
   if (!query) return null;
   // No freshness window: the brief is the ONLY served answer for an entity (the live-LLM
@@ -95,10 +100,11 @@ export async function getEntityIntelBrief(query) {
   // weeks old, carrying its digest_date for an "as of" label, beats a live LLM call.
   try {
     const { rows } = await pool.query(
-      `SELECT entity_name, brief_html, digest_date
-       FROM entity_intel_brief
-       WHERE lower(entity_name) = lower($1)
-       ORDER BY digest_date DESC
+      `SELECT b.entity_name, b.brief_html, b.digest_date, e.slug
+       FROM entity_intel_brief b
+       LEFT JOIN entity_memory e ON lower(e.name) = lower(b.entity_name)
+       WHERE lower(b.entity_name) = lower($1)
+       ORDER BY b.digest_date DESC
        LIMIT 1`,
       [query]
     );
@@ -115,10 +121,11 @@ export async function getEntityIntelBrief(query) {
     if (!em[0]) return null;
 
     const { rows: rows2 } = await pool.query(
-      `SELECT entity_name, brief_html, digest_date
-       FROM entity_intel_brief
-       WHERE lower(entity_name) = lower($1)
-       ORDER BY digest_date DESC
+      `SELECT b.entity_name, b.brief_html, b.digest_date, e.slug
+       FROM entity_intel_brief b
+       LEFT JOIN entity_memory e ON lower(e.name) = lower(b.entity_name)
+       WHERE lower(b.entity_name) = lower($1)
+       ORDER BY b.digest_date DESC
        LIMIT 1`,
       [em[0].name]
     );
@@ -129,32 +136,9 @@ export async function getEntityIntelBrief(query) {
 }
 
 
-// Shared stop-list for entity-tag matching: crypto-generic vocab + common English
-// words that are ALSO protocol/entity names. Mirrors app/entities.GENERIC_TERMS.
-// A bare word-boundary match on any of these is a false-positive generator —
-// "Current" on "AAVE's current value", "Team Finance" on any "team", "Funding
-// Commons" on any "funding", "Reserve Protocol" on "Chainlink Reserve". Kept in
-// ONE place so the DeFiLlama + entity_memory matchers can't drift apart.
-const TAG_STOPWORDS = [
-  // crypto-generic
-  'chain','free','idle','defi','token','tokens','network','protocol','finance',
-  'open','world','new','core','main','node','fund','funds','labs','across','yield',
-  'capital','basis','group','standard','bridge','native','wrapped','push','vault',
-  'vaults','credit','lending','stable','stablecoin','savings','saving','staking',
-  'staked','liquid','restaking','perp','perps','pool','pools','prime','real','spot',
-  'treasury','rewards','points','public','swap','swaps','dex','blockchain','digital',
-  'crypto','decentralized','global','circle','fun',
-  // common English words that are also protocol/entity names (false-positive class)
-  'current','team','reserve','extra','neutral','funding','story','general','future',
-  'futures','signal','simple','instant','secure','trust','official','select','fixed',
-  'smart','auto','strategy','movement','bullish','bearish','believe','master','super',
-  'summit','pure','solid','basic','fair','grand','markets','market',
-  // junk single-word aliases (extraction noise) — NOT brand names (Base/Flow/Spark/
-  // Render/Strike are handled by case-sensitive matching, never stop-listed).
-  'hard','edge','next','move','link','farm','coin','call','date','deal','news','live',
-  'wave','gate',
-
-];
+// Shared stop-list for entity-tag matching — single-sourced in lib/tagStopwords.js
+// (also consumed by the JS matchers in lib/projects.js, so the SQL and JS matcher
+// layers can never drift apart on vocabulary).
 const STOP_SQL = `ARRAY[${TAG_STOPWORDS.map(w => `'${w}'`).join(',')}]`;
 
 
@@ -298,6 +282,57 @@ export async function searchEntityMemory(text) {
     return [];
   }
 }
+
+
+// Bulk candidate rows for buildProjectHints (web/lib/projects.js): searchProjectInfo /
+// searchEntityMemory above run the whole word-boundary match as a per-row dynamic regex
+// inside Postgres, which is unindexable (the pattern is built FROM the row, matched
+// against the param) and forced a full scan + JIT compile PER BULLET — on a 2-vCPU box
+// that's the dominant cost of the daily feed's first paint (measured ~1.3s/bullet just
+// for the entity query). These two fetch the full candidate universe ONCE per digest
+// date (cheap plain scans, no per-row regex) so the matching itself can run in JS —
+// see `_buildProjectHints`. Cached independently of the per-date wrapper so a cache
+// eviction doesn't force a full-cost rebuild.
+export const getProtocolCandidates = unstable_cache(
+  async () =>
+    safeRows(
+      `SELECT slug, name, category, chains, chain_tvls, tvl_usd::float8, tvl_change_1d::float8,
+              url, logo_url, token_symbol, gecko_id
+         FROM defillama_protocols
+        ORDER BY tvl_usd DESC NULLS LAST`
+    ),
+  ["horyon-protocol-candidates"],
+  { revalidate: 600 }
+);
+
+// entity_memory candidates (mention_count >= 2, tracked types only) + the separate
+// "parent" set (single-word entities with mention_count >= 5, ANY type) needed to
+// suppress a child multi-word entity's first-word match when a standalone parent
+// entity already owns that word (mirrors searchEntityMemory's Path 2b NOT EXISTS).
+export const getEntityCandidates = unstable_cache(
+  async () => {
+    const [rows, parents] = await Promise.all([
+      safeRows(
+        `SELECT e.slug, e.name, e.type, e.aliases, e.mention_count, e.twitter_handle,
+                COALESCE(p.logo_url, e.logo_url) AS logo_url,
+                p.category, p.tvl_usd::float8, p.gecko_id,
+                EXISTS (SELECT 1 FROM entity_avatars av
+                        WHERE av.slug = e.slug AND av.image IS NOT NULL) AS avatar_cached
+           FROM entity_memory e
+           LEFT JOIN defillama_protocols p ON p.slug = e.slug
+          WHERE e.mention_count >= 2 AND e.type NOT IN ('other')
+          ORDER BY e.mention_count DESC`
+      ),
+      safeRows(
+        `SELECT lower(name) AS name FROM entity_memory
+          WHERE name NOT LIKE '% %' AND mention_count >= 5`
+      ),
+    ]);
+    return { rows, parentNames: parents.map(p => p.name) };
+  },
+  ["horyon-entity-candidates"],
+  { revalidate: 600 }
+);
 
 
 // ── Narratives ──────────────────────────────────────────────────────────────

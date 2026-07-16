@@ -22,38 +22,16 @@ from __future__ import annotations
 
 import argparse
 import logging
-import re
 import time
 from datetime import date, datetime, timezone
 
 from . import analyst, config, db, entities, llm, prompts
 from .telegram_html import sanitize
+# Shared with the live digest build (and app/backfill.py) — this module used to carry its own
+# pre-quality_flag copies, which had silently drifted from the NOTE-annotating originals.
+from .digest import _format_items
 
 log = logging.getLogger(__name__)
-
-_TAG_RE = re.compile(r"<[^>]*>")
-
-
-def _clean_text(content: str) -> str:
-    text = _TAG_RE.sub("", content or "")
-    text = re.sub(r"\s+", " ", text).strip()
-    text = text.replace('"', "'")
-    return text[:2000]
-
-
-def _format_items(rows: list[dict]) -> str:
-    blocks = []
-    for r in rows:
-        text = _clean_text(r.get("content", ""))
-        if len(text) <= 40:
-            continue
-        blocks.append(
-            f"TYPE: {(r.get('source_type') or '').upper()}\n"
-            f"TEXT: {text}\n"
-            f"LINK: {r.get('link', '')}\n"
-            f"CREATOR: {r.get('creator', '')}"
-        )
-    return "\n\n---\n\n".join(blocks)
 
 
 def _delete_digest_rows(d: date) -> int:

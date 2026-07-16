@@ -70,6 +70,42 @@ export const getChainDirectory = unstable_cache(
 );
 
 
+// Structured facts (TVL + CoinGecko market data) for ONE entity, by exact slug — the
+// stat strip SearchPanel shows above a resolved intel brief. Deliberately an exact-slug
+// join, NOT the brand-aggregation getEntityLeague does: the same entity's numbers must
+// match what the brief's own LLM-facing "VERIFIED DATABASE FACTS" block cites
+// (app/entity_brief.py._entity_db_facts uses the identical exact-slug lookup), so search
+// never shows the UI one number while the brief prose cites another. Returns null when
+// the slug has neither TVL nor market data (the common case for non-token entities).
+export async function getEntityFacts(slug) {
+  if (!slug) return null;
+  const rows = await safeRows(
+    `SELECT p.tvl_usd::float8 AS tvl_usd, p.tvl_change_7d::float8 AS tvl_change_7d,
+            p.category, p.token_symbol,
+            m.price_usd::float8 AS price_usd, m.market_cap_usd::float8 AS market_cap_usd,
+            m.fdv_usd::float8 AS fdv_usd, m.price_change_7d_pct::float8 AS price_change_7d_pct
+       FROM (SELECT 1) AS _one
+       LEFT JOIN defillama_protocols p ON p.slug = $1
+       LEFT JOIN coingecko_market m
+         ON m.gecko_id = $1 AND m.fetched_at > now() - INTERVAL '3 days'`,
+    [slug]
+  );
+  const r = rows[0];
+  if (!r) return null;
+  if (r.tvl_usd == null && r.market_cap_usd == null) return null;
+  return {
+    tvl: r.tvl_usd ?? null,
+    tvlChange7d: r.tvl_change_7d ?? null,
+    category: r.category || null,
+    tokenSymbol: r.token_symbol || null,
+    price: r.price_usd ?? null,
+    marketCap: r.market_cap_usd ?? null,
+    fdv: r.fdv_usd ?? null,
+    priceChange7d: r.price_change_7d_pct ?? null,
+  };
+}
+
+
 // Latest TVL snapshot per chain from defillama_tvl, sorted total-first then tvl desc.
 export async function getTvlSnapshot() {
   const rows = await safeRows(

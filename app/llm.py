@@ -63,12 +63,20 @@ def _client_for(provider: str) -> OpenAI:
     return _clients[provider]
 
 
-def _model_chain() -> list[tuple[str, str]]:
-    """Ordered (provider, model) attempts: NVIDIA NIM first, then OpenRouter."""
+def _model_chain(skip_models: "frozenset[str] | set[str] | None" = None) -> list[tuple[str, str]]:
+    """Ordered (provider, model) attempts: NVIDIA NIM first, then OpenRouter.
+
+    ``skip_models`` filters models out of the chain (long-form prose callers skip the
+    reasoning models — see config.REASONING_MODELS). The filter is IGNORED when it would
+    empty the chain: multiple-models-always beats a perfect exclusion."""
     chain: list[tuple[str, str]] = []
     if config.NIM_API_KEY and config.NIM_MODELS:
         chain += [("nim", m) for m in config.NIM_MODELS]
     chain += [("openrouter", m) for m in config.OPENROUTER_MODELS]
+    if skip_models:
+        filtered = [(p, m) for p, m in chain if m not in skip_models]
+        if filtered:
+            return filtered
     return chain
 
 
@@ -80,14 +88,14 @@ def _retryable(exc: Exception) -> bool:
     return getattr(exc, "status_code", None) in _TRANSIENT_STATUSES
 
 
-def _chat(**kwargs) -> tuple:
+def _chat(skip_models: "frozenset[str] | set[str] | None" = None, **kwargs) -> tuple:
     """Try each (provider, model) in the chain; retry brief 5xx/conn blips once per model.
 
     Falls through to the next model on ANY API error (429/404/5xx/timeout/auth/400) so a
     single bad provider, model, or key never kills the pipeline. Returns (response,
     model_name); raises the last error only when every model is exhausted.
     """
-    chain = _model_chain()
+    chain = _model_chain(skip_models)
     if not chain:
         raise RuntimeError("no LLM models configured (set NIM_MODELS or OPENROUTER_MODELS)")
     last_exc: Exception | None = None
@@ -112,12 +120,23 @@ def _chat(**kwargs) -> tuple:
     raise last_exc or RuntimeError("no models available")
 
 
-def complete(system: str, user: str, max_tokens: int = MAX_TOKENS,
-             temperature: float | None = None, json_mode: bool = False) -> tuple[str, str]:
-    """Returns (content, model_used).
+def complete_ex(system: str, user: str, max_tokens: int = MAX_TOKENS,
+                temperature: float | None = None,
+                json_mode: bool = False,
+                skip_reasoning: bool = False,
+                timeout: float | None = None) -> tuple[str, str, str]:
+    """Like ``complete()`` but also returns the provider ``finish_reason`` — ``(content,
+    model_used, finish_reason)``.
 
-    temperature: lower = more deterministic; pass ~0.2 for JSON/format tasks, ~0.5 for prose.
-    json_mode: request `response_format=json_object` (provider falls through if a model rejects it).
+    ``finish_reason == "length"`` means the model hit ``max_tokens`` and its output was CUT OFF
+    mid-generation (a truncated, un-closed response). Callers that render long free-form output
+    (e.g. the audio-briefing script) need this to tell a genuine, cleanly-finished draft from a
+    silently-truncated one — the content alone looks the same until you notice it ends mid-sentence.
+
+    ``timeout`` (seconds) overrides config.LLM_TIMEOUT_SEC for THIS request only. The global 60s
+    ceiling exists so a hung model falls through fast, but a ~7200-token explainer script at
+    ~50 tok/s legitimately needs ~145s — without the override the primary model times out on
+    exactly the longest (most valuable) generations (2026-07-15 explainer incident).
     """
     kwargs: dict = {
         "max_tokens": max_tokens,
@@ -130,8 +149,49 @@ def complete(system: str, user: str, max_tokens: int = MAX_TOKENS,
         kwargs["temperature"] = temperature
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
-    resp, model = _chat(**kwargs)
-    return (resp.choices[0].message.content or "").strip(), model
+    if timeout is not None:
+        kwargs["timeout"] = timeout  # per-request option, honored by the OpenAI client
+    # skip_reasoning: long-form prose paths (audio-briefing scripts, entity briefs) exclude
+    # the reasoning models — their <think> planning burns the token budget and has leaked as
+    # the answer itself (2026-07-07 brief incident). JSON-shaped tasks keep the full chain.
+    resp, model = _chat(skip_models=config.REASONING_MODELS if skip_reasoning else None,
+                        **kwargs)
+    choice = resp.choices[0]
+    finish = (getattr(choice, "finish_reason", None) or "").lower()
+    return (choice.message.content or "").strip(), model, finish
+
+
+def complete(system: str, user: str, max_tokens: int = MAX_TOKENS,
+             temperature: float | None = None, json_mode: bool = False,
+             skip_reasoning: bool = False, timeout: float | None = None) -> tuple[str, str]:
+    """Returns (content, model_used).
+
+    temperature: lower = more deterministic; pass ~0.2 for JSON/format tasks, ~0.5 for prose.
+    json_mode: request `response_format=json_object` (provider falls through if a model rejects it).
+    skip_reasoning: exclude config.REASONING_MODELS from the chain — for long-form prose paths
+    where visible chain-of-thought has leaked past format guards (never empties the chain).
+    timeout: per-request override of config.LLM_TIMEOUT_SEC (long-form generations need >60s).
+    """
+    content, model, _ = complete_ex(system, user, max_tokens=max_tokens,
+                                    temperature=temperature, json_mode=json_mode,
+                                    skip_reasoning=skip_reasoning, timeout=timeout)
+    return content, model
+
+
+# ── Reasoning-leak strip (shared primitive) ──────────────────────────────────
+# A reasoning fallback model can emit its chain-of-thought in <think>…</think> tags
+# (or an unclosed <think> that runs to the end). Every persist path strips these
+# BEFORE its own content guard; the guards themselves (digest._keep_bullets_only,
+# entity_brief._clean_brief, podcasts._clean_map_note, briefing's inline-planning
+# detector) stay per-module — their rejection phrases are anchored to each prompt.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think>.*\Z", re.DOTALL | re.IGNORECASE)
+
+
+def strip_think(text: str) -> str:
+    """Remove <think> blocks (closed or unclosed-to-EOF) from model output and trim."""
+    text = _THINK_RE.sub("", text or "")
+    return _THINK_OPEN_RE.sub("", text).strip()
 
 
 # ── Robust JSON parsing for model output ─────────────────────────────────────

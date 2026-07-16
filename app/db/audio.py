@@ -122,16 +122,33 @@ def get_audio_bytes(digest_date: "date_t", variant: str = "standard") -> "bytes 
 
 
 def get_existing_audio_variants(digest_date: "date_t") -> set:
-    """The set of audio-briefing variant keys already stored for a date (any status). Lets a
-    backfill render only the MISSING variants instead of re-running existing ones."""
+    """The set of audio-briefing variant keys already stored for a date, EXCLUDING 'failed'
+    rows. Lets a backfill render only the MISSING variants instead of re-running existing
+    ones. A 'failed' row is a retryable marker (script couldn't be produced — see
+    app/briefing.py), so it counts as missing; 'blocked' is a terminal fail-closed verdict
+    and 'pending'/'ready' are in-flight/done — none of those are re-rendered."""
     return {r[0] for r in _fetchall(
-        "SELECT variant FROM digest_audio WHERE digest_date = %s", (digest_date,))}
+        "SELECT variant FROM digest_audio WHERE digest_date = %s AND status <> 'failed'",
+        (digest_date,))}
+
+
+def get_audio_variant_status(digest_date: "date_t") -> list[dict]:
+    """Per-variant lifecycle for a date: ``[{variant, status, created_at}]`` for every stored
+    row (any status). Drives the same-day AUDIO self-heal (``briefing.variants_needing_heal`` +
+    ``main._maybe_heal_audio``), which needs each variant's status AND last-attempt time to decide
+    whether a 'failed' row is old enough to retry. Empty list = no rows yet for the date."""
+    return _fetchall(
+        "SELECT variant, status, created_at FROM digest_audio WHERE digest_date = %s",
+        (digest_date,),
+        dict_rows=True,
+    )
 
 
 def get_digest_dates_without_audio(variants: "tuple[str, ...]" = ("standard",)) -> list["date_t"]:
     """Digest dates that have bullet analyses but are missing one or more of the given audio
-    ``variants`` (for backfill). A date counts as "complete" once it has a row (any status) for
-    every requested variant — so an intentionally blocked render isn't retried forever."""
+    ``variants`` (for backfill). A date counts as "complete" once it has a non-'failed' row
+    for every requested variant — an intentionally blocked render isn't retried forever, but
+    a 'failed' marker (script never produced) stays visible to backfill."""
     return [r[0] for r in _fetchall(
         """
         SELECT a.digest_date
@@ -139,7 +156,7 @@ def get_digest_dates_without_audio(variants: "tuple[str, ...]" = ("standard",)) 
         LEFT JOIN (
             SELECT digest_date, count(*) AS n
             FROM digest_audio
-            WHERE variant = ANY(%s)
+            WHERE variant = ANY(%s) AND status <> 'failed'
             GROUP BY digest_date
         ) au ON au.digest_date = a.digest_date
         WHERE coalesce(au.n, 0) < %s
@@ -147,3 +164,19 @@ def get_digest_dates_without_audio(variants: "tuple[str, ...]" = ("standard",)) 
         """,
         (list(variants), len(variants)),
     )]
+
+
+def null_old_audio(days: int) -> int:
+    """Retention: NULL the rendered audio BYTES on briefings older than ``days``; the script,
+    chapters, waveform, and metadata are kept forever (transcript history survives — only the
+    ~2 MB/variant bytea goes). digest_audio is the DB's largest growth line (294 MB, 44% of
+    the DB, on 2026-07-07 at ~5 MB/day); this bounds it. Aged-out rows keep status='ready',
+    so the backfill queries above still count them as complete and never re-render them; the
+    web route already treats absent audio as absent. Returns the number of rows nulled."""
+    if days <= 0:
+        return 0
+    return _execute(
+        "UPDATE digest_audio SET audio = NULL, byte_size = NULL "
+        "WHERE digest_date < current_date - %s AND audio IS NOT NULL",
+        (days,),
+    )

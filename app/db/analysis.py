@@ -103,6 +103,30 @@ def get_prior_bullets_matching_terms(terms: list[str], before_date: "date_t", da
     )]
 
 
+def get_digest_bullets_matching_since(terms: list[str], since_date: "date_t",
+                                      limit: int = 5) -> list[dict]:
+    """Digest bullets whose title/body word-boundary-matches any `terms`, published ON or
+    AFTER `since_date` (inclusive). Deterministic — powers the podcast-prediction
+    follow-through recheck (podcasts.recheck_predictions): 'did coverage of what this
+    prediction named appear after the episode?'. Oldest-first so the FIRST corroborating
+    coverage leads. Returns (digest_date, title)."""
+    pattern = _term_boundary_regex(terms)
+    if not pattern:
+        return []
+    return [dict(r) for r in _fetchall(
+        """
+        SELECT digest_date, title
+        FROM digest_bullet_analysis
+        WHERE (title ~* %s OR body ~* %s)
+          AND digest_date >= %s::date
+        ORDER BY digest_date ASC
+        LIMIT %s
+        """,
+        (pattern, pattern, since_date, limit),
+        dict_rows=True,
+    )]
+
+
 def delete_bullet_analyses(digest_date: "date_t") -> int:
     """Delete all pre-computed analyses for a given digest date. Returns count deleted."""
     return _execute(

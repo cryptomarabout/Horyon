@@ -30,6 +30,9 @@ export default function AudioProvider({ children }) {
   // True while the full AudioPlayer UI is mounted in BulletFeed so the
   // persistent mini-bar knows to stay hidden.
   const [playerMounted, setPlayerMounted] = useState(false);
+  // Deep-link seek target (seconds) from a ?t= URL. Takes precedence over the saved
+  // position on the next load, then clears. Set via requestSeek() by AudioPlayer.
+  const pendingSeekRef = useRef(null);
 
   const active = variants.find((v) => v.variant === variant) || variants[0] || null;
   const chaps = Array.isArray(active?.chapters)
@@ -70,12 +73,24 @@ export default function AudioProvider({ children }) {
     a.load();
     a.playbackRate = rateRef.current;
 
-    // Restore saved listening position (seek once metadata is known).
-    const saved = parseFloat(localStorage.getItem(posKey(date, variant)) || "0");
-    if (saved > 0 && isFinite(saved)) {
+    // Seek target on load: a pending deep-link (?t=) wins over the saved position.
+    const pending = pendingSeekRef.current;
+    pendingSeekRef.current = null;
+    const target = pending != null && isFinite(pending)
+      ? pending
+      : parseFloat(localStorage.getItem(posKey(date, variant)) || "0");
+    const autoplayDeepLink = pending != null;
+    if (target > 0 && isFinite(target)) {
       const onMeta = () => {
-        a.currentTime = Math.min(saved, a.duration || 0);
+        a.currentTime = Math.min(target, a.duration || 0);
+        setCur(a.currentTime);
         a.removeEventListener("loadedmetadata", onMeta);
+        // A deliberate deep link should expand + try to play (autoplay may be blocked;
+        // failing is fine — the user lands paused at the right spot).
+        if (autoplayDeepLink) {
+          setExpanded(true);
+          a.play().catch(() => {});
+        }
       };
       a.addEventListener("loadedmetadata", onMeta);
     }
@@ -169,6 +184,27 @@ export default function AudioProvider({ children }) {
     [variant, variants]
   );
 
+  // Deep-link seek (?t=): if the audio for this date/variant is already loaded, seek now;
+  // otherwise stash it so the load effect applies it once metadata arrives. `targetVariant`
+  // (optional) switches length first — the switch reloads and consumes the pending seek.
+  const requestSeek = useCallback((t, targetVariant = null) => {
+    if (!(t >= 0) || !isFinite(t)) return;
+    pendingSeekRef.current = t;
+    if (targetVariant && targetVariant !== variant &&
+        variants.some((x) => x.variant === targetVariant)) {
+      switchVariant(targetVariant);   // reload → load effect applies the pending seek
+      return;
+    }
+    const a = audioRef.current;
+    if (a && a.readyState >= 1 && (a.duration || 0) > 0) {
+      pendingSeekRef.current = null;
+      a.currentTime = Math.min(t, a.duration || 0);
+      setCur(a.currentTime);
+      setExpanded(true);
+      a.play().catch(() => {});
+    }
+  }, [variant, variants, switchVariant]);
+
   const trackHover = useCallback(
     (e) => {
       const d = active?.duration_sec || dur;
@@ -206,7 +242,7 @@ export default function AudioProvider({ children }) {
     hasVariants, chaps, hasChapters, activeChap,
     audioRef,
     // actions
-    setSource, toggle, seek, skip, jumpTo, cycleRate, switchVariant,
+    setSource, toggle, seek, skip, jumpTo, requestSeek, cycleRate, switchVariant,
     setShowChapters, setShowTranscript, setHover, setExpanded, setPlayerMounted, trackHover,
     openStory, dismiss,
   };

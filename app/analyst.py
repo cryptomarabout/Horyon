@@ -14,20 +14,17 @@ import logging
 import re
 from datetime import date, datetime, timezone
 
-from . import config, db, llm, prompts
+from . import config, db, llm, prompts, util
 
 log = logging.getLogger(__name__)
 
-_TAG_RE = re.compile(r"<[^>]*>")
-_WS_RE = re.compile(r"\s+")
 _JSON_FENCE_RE = re.compile(r"```[a-z]*\n?", re.IGNORECASE)
 
 # Strip leading "# Crypto Digest YYYY-MM-DD" header from stored digest content
 _HEADER_RE = re.compile(r"^#[^\n]+\n+", re.MULTILINE)
 
 
-def _strip_html(text: str) -> str:
-    return _WS_RE.sub(" ", _TAG_RE.sub(" ", text or "")).strip()
+_strip_html = util.plain_text
 
 
 def _clean_digest_content(content: str) -> str:

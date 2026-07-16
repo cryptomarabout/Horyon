@@ -18,13 +18,14 @@ from .feeds import (
 )
 from .digest import (
     get_cache, set_cache, insert_digest, record_keyword_analysis, get_digest,
-    get_recent_digests, get_recent_keyword_analyses, get_recent_digests_text,
-    get_digest_contents_for_dedup, get_digests_for_range,
+    get_digest_attempts, get_recent_digests, get_recent_keyword_analyses,
+    get_recent_digests_text, get_digest_contents_for_dedup, get_digests_for_range,
 )
 from .protocols import (
     upsert_tvl, get_latest_tvl, get_chain_tvl_for_week, upsert_protocols,
     get_top_protocols, get_protocols_by_slugs, get_protocol_tvls,
     get_protocol_category_summary, get_protocol_tvl_movers,
+    upsert_market_data, get_market_data_by_slugs,
 )
 from .entities import (
     CANONICAL_ENTITY_TYPES, entity_generation, upsert_entity, upsert_entity_from_coingecko,
@@ -32,7 +33,8 @@ from .entities import (
     get_governance_for_entity, touch_entity_mentions, decay_stale_entities,
     seed_entities_from_protocols, get_entity_mention_map, get_entities_for_briefing,
     get_entities_for_matching, upsert_entity_intel_brief, get_entity_intel_brief,
-    update_digest_mention_counts,
+    update_digest_mention_counts, get_entity_reviews, set_entity_review,
+    prose_doc_count,
 )
 from .analysis import (
     insert_analyst_notes, upsert_bullet_analyses, get_bullet_analyses,
@@ -46,7 +48,7 @@ from .threads import (
 from .audio import (
     upsert_audio_briefing, delete_og_card, upsert_og_card, upsert_entity_avatar,
     get_audio_briefing, get_audio_bytes, get_existing_audio_variants,
-    get_digest_dates_without_audio,
+    get_audio_variant_status, get_digest_dates_without_audio, null_old_audio,
 )
 from .weekly import (
     insert_weekly_digest, get_weekly_for_date, list_weekly_digests,
@@ -54,12 +56,17 @@ from .weekly import (
 )
 from .governance import (
     upsert_governance_proposals, get_active_governance_proposals,
-    get_governance_signals_window,
+    get_governance_signals_window, close_expired_proposals,
 )
 from .podcasts import (
     insert_podcast_episode, get_pending_podcast_episodes, store_podcast_summary,
     mark_podcast_episode, get_recent_podcast_summaries, get_podcast_summaries_window,
+    insert_podcast_predictions, get_open_predictions, update_prediction_outcome,
+    get_predictions_for_research,
 )
 from .narratives import (
     get_existing_narratives, replace_narratives, replace_entity_edges,
+)
+from .evals import (
+    insert_eval_results, get_eval_batches,
 )

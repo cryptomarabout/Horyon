@@ -19,6 +19,7 @@ from app.scoring import (
     _build_covered_word_sets,
     _build_recent_entity_coverage,
     _bullet_entities,
+    _is_soft_echo,
     _norm_title,
     _signal_amount,
     _signal_corroboration,
@@ -169,26 +170,65 @@ def test_credibility_case_insensitive():
     assert get_source_credibility("@DEFILLAMA") == 1.2
 
 
-# ── _signal_corroboration ────────────────────────────────────────────────────
+# ── _signal_corroboration (log-spaced bands, T1 recalibration 2026-07-11) ─────
+# Bands on the credibility SUM: M≥3.0→25 (premium override), T≥24→25, ≥12→21,
+# ≥6→17, ≥3→13, ≥1.5→9, ≥0.8→5, ≥0.4→2, else 0.
 
-def test_corroboration_high_total():
-    assert _signal_corroboration([1.2, 1.2, 1.0]) == 25   # sum = 3.4
+def test_corroboration_top_band_needs_broad_sum():
+    # 24 Tier-2 sources (sum 24) is genuine broad corroboration → top band.
+    assert _signal_corroboration([1.0] * 24) == 25
 
 
-def test_corroboration_medium():
-    assert _signal_corroboration([1.2, 1.0]) == 20   # sum = 2.2
+def test_corroboration_twelve_band():
+    assert _signal_corroboration([1.0] * 12) == 21   # sum 12.0
+    assert _signal_corroboration([1.0] * 20) == 21   # still ≥12, below the 24 top band
+
+
+def test_corroboration_six_band():
+    assert _signal_corroboration([1.2, 1.2, 1.2, 1.2, 1.2]) == 17   # sum 6.0
+
+
+def test_corroboration_three_band():
+    assert _signal_corroboration([1.2, 1.2]) == 9    # sum 2.4 → ≥1.5 band
 
 
 def test_corroboration_single_trusted():
-    assert _signal_corroboration([1.0]) == 12
+    assert _signal_corroboration([1.2]) == 5   # sum 1.2 → ≥0.8 band
+
+
+def test_corroboration_single_tier2():
+    assert _signal_corroboration([1.0]) == 5   # sum 1.0 → ≥0.8 band
 
 
 def test_corroboration_single_clickbait():
-    assert _signal_corroboration([0.4]) == 5
+    assert _signal_corroboration([0.4]) == 2   # sum 0.4 → ≥0.4 band
 
 
 def test_corroboration_empty():
     assert _signal_corroboration([]) == 0
+
+
+def test_corroboration_three_tier2_not_max():
+    # 3 unknown Tier-2 sources sum to 3.0 with no trusted/premium source → 13, far
+    # below max. (The cheapest republication attack cannot fake broad corroboration.)
+    assert _signal_corroboration([1.0, 1.0, 1.0]) == 13
+
+
+def test_corroboration_kaiko_alone_reaches_25():
+    # A single Kaiko article (weight 3.0) must keep hitting the max band via the
+    # premium override — the documented premium-tier property.
+    assert _signal_corroboration([3.0]) == 25
+
+
+def test_corroboration_kaiko_plus_others_still_max():
+    assert _signal_corroboration([3.0, 1.0]) == 25
+
+
+def test_corroboration_is_monotonic_in_sum():
+    # Each successive band must not decrease as the credibility sum grows.
+    sums = [[0.4], [1.0], [1.2, 1.2], [1.2] * 5, [1.0] * 12, [1.0] * 24]
+    scores = [_signal_corroboration(c) for c in sums]
+    assert scores == sorted(scores)
 
 
 # ── _signal_amount ───────────────────────────────────────────────────────────
@@ -328,6 +368,25 @@ def test_criticality_highest_bucket_wins():
     assert _signal_criticality("Hack exposes partnership vulnerability") == 15
 
 
+def test_criticality_phishing_theft_top_bucket():
+    assert _signal_criticality("Polymarket user suffers phishing loss") == 15
+    assert _signal_criticality("Funds stolen from bridge contract") == 15
+
+
+def test_criticality_shuts_and_buys():
+    assert _signal_criticality("Loopring shuts DEX after strategy review") == 11
+    assert _signal_criticality("SBI Holdings buys Bitbank exchange") == 11
+
+
+def test_criticality_ipo():
+    assert _signal_criticality("Circle IPO values firm at billions") == 11
+
+
+def test_criticality_debut_and_listing():
+    assert _signal_criticality("Securitize NYSE debut") == 7
+    assert _signal_criticality("Coinbase listing confirmed for AERO") == 7
+
+
 # ── _signal_novelty ──────────────────────────────────────────────────────────
 
 def test_novelty_new_story_scores_5():
@@ -345,6 +404,57 @@ def test_novelty_duplicate_story_scores_0():
 def test_novelty_empty_title_scores_5():
     ref = _make_ref()
     assert _signal_novelty("", ref) == 5
+
+
+def test_novelty_near_duplicate_scores_0():
+    # 2 shared words covering ≥2/3 of the shorter set: slips the strict digest-gate
+    # test (needs 3 shared) but the looser scoring-side check must catch it —
+    # otherwise s6 is a constant (it never fired once in 60 days of production).
+    covered = {"aave", "gho", "launch"}
+    assert not is_semantic_duplicate({"aave", "gho", "proposal"}, covered)
+    ref = _make_ref()
+    ref.covered_word_sets = [covered]
+    assert _signal_novelty("Aave GHO proposal", ref) == 0
+
+
+def test_novelty_soft_echo_scores_2():
+    # A partial thematic repeat (one shared subject, mostly new words) is neither a
+    # near-duplicate nor fully fresh → the middle band. "Aave V4 hits $250M deposits"
+    # softly echoes prior "Aave V4 launches new instance" without being a dup.
+    covered = get_title_words("Aave V4 launches new lending instance")
+    ref = _make_ref()
+    ref.covered_word_sets = [covered]
+    s = _signal_novelty("Aave V4 hits deposits milestone", ref)
+    assert s == 2
+
+
+def test_novelty_strong_dup_beats_soft_echo():
+    # A near-dup covered set must win (0) even if another set is only a soft echo.
+    dup = get_title_words("Aave launches on Arbitrum mainnet")
+    echo = get_title_words("Aave revenue climbs this quarter")
+    ref = _make_ref()
+    ref.covered_word_sets = [echo, dup]
+    assert _signal_novelty("Aave launches on Arbitrum", ref) == 0
+
+
+# ── _is_soft_echo ────────────────────────────────────────────────────────────
+
+def test_soft_echo_partial_overlap_true():
+    assert _is_soft_echo({"aave", "v4", "deposits"}, {"aave", "v4", "launch", "instance"})
+
+
+def test_soft_echo_no_overlap_false():
+    assert not _is_soft_echo({"aave", "gho"}, {"bitcoin", "etf", "inflows"})
+
+
+def test_soft_echo_disjoint_chains_false():
+    # Same subject but different chains → not an echo (mirrors the near-dup guard).
+    assert not _is_soft_echo({"uniswap", "deploys", "arbitrum"},
+                             {"uniswap", "deploys", "optimism"})
+
+
+def test_soft_echo_empty_false():
+    assert not _is_soft_echo(set(), {"aave"})
 
 
 # ── _signal_saturation ───────────────────────────────────────────────────────
@@ -509,6 +619,77 @@ def test_compute_multiple_bullets(mock_db):
         assert b["importance_score"] is not None
 
 
+def test_compute_velocity_ignores_same_source_reposts(mock_db):
+    """5 reposts by ONE account within 3h is not velocity (was s3=15, now 0)."""
+    now = datetime.now(timezone.utc)
+    mock_db.get_feed_items_matching_terms.return_value = [
+        {"link": f"https://x.com/spam/status/{i}", "ts": now - timedelta(hours=0.2 * i),
+         "quality_flag": "ok", "content": "Aave update repost"}
+        for i in range(5)
+    ]
+    out = compute_importance_scores([{"title": "Aave update", "body": ""}], "2025-01-01")
+    assert out[0]["score_breakdown"]["s3"] == 0
+
+
+def test_compute_velocity_counts_distinct_sources(mock_db):
+    now = datetime.now(timezone.utc)
+    mock_db.get_feed_items_matching_terms.return_value = [
+        {"link": f"https://x.com/user{i}/status/1", "ts": now - timedelta(hours=0.2 * i),
+         "quality_flag": "ok", "content": "Aave update news"}
+        for i in range(5)
+    ]
+    out = compute_importance_scores([{"title": "Aave update", "body": ""}], "2025-01-01")
+    assert out[0]["score_breakdown"]["s3"] == 15  # 5 distinct sources inside 3h
+
+
+def test_compute_amount_ignores_corroborating_item_figures(mock_db):
+    """An adjacent item's '$2B' must not inflate a bullet that cites no figure."""
+    mock_db.get_feed_items_matching_terms.return_value = [
+        {"link": "https://x.com/a/status/1", "ts": datetime.now(timezone.utc),
+         "quality_flag": "ok", "content": "Aave governance vote and an unrelated $2B milestone"},
+    ]
+    out = compute_importance_scores([{"title": "Aave governance vote", "body": ""}], "2025-01-01")
+    assert out[0]["score_breakdown"]["s1"] == 5    # one Tier-2 source (sum 1.0) DOES corroborate…
+    assert out[0]["score_breakdown"]["s2"] == 0    # …but its figure is not the bullet's
+
+
+def test_compute_source_count_uses_source_keys_not_domains(mock_db):
+    """Two Twitter handles used to collapse into one x.com domain → badge said 1."""
+    now = datetime.now(timezone.utc)
+    mock_db.get_feed_items_matching_terms.return_value = [
+        {"link": "https://x.com/alpha/status/1", "ts": now, "quality_flag": "ok",
+         "content": "Aave update coverage"},
+        {"link": "https://x.com/beta/status/2", "ts": now, "quality_flag": "ok",
+         "content": "Aave update coverage"},
+    ]
+    out = compute_importance_scores([{"title": "Aave update", "body": ""}], "2025-01-01")
+    assert out[0]["source_count"] == 2
+
+
+def test_compute_uses_48h_corroboration_window(mock_db):
+    compute_importance_scores([{"title": "Aave update", "body": ""}], "2025-01-01")
+    _, kwargs = mock_db.get_feed_items_matching_terms.call_args
+    assert kwargs.get("window_hours") == 48
+
+
+def test_compute_fallback_terms_require_two_matches(mock_db):
+    """Entity-less bullets corroborate via generic words (OR-matched in the DB);
+    an item matching only ONE fallback term ("volume") is noise, not corroboration."""
+    now = datetime.now(timezone.utc)
+    mock_db.get_feed_items_matching_terms.return_value = [
+        {"link": "https://x.com/noise/status/1", "ts": now,
+         "quality_flag": "ok", "content": "huge volume across markets today"},
+        {"link": "https://x.com/related/status/2", "ts": now,
+         "quality_flag": "ok", "content": "TradeXYZ posts record volume"},
+    ]
+    out = compute_importance_scores(
+        [{"title": "TradeXYZ hits record volume", "body": ""}], "2025-01-01")
+    # Only the 2-term item survives → one Tier-2 source (sum 1.0) → s1=5, no velocity.
+    assert out[0]["source_count"] == 1
+    assert out[0]["score_breakdown"]["s1"] == 5
+    assert out[0]["score_breakdown"]["s3"] == 0
+
+
 def test_compute_scores_none_when_refdata_load_fails(mock_db):
     """If reference-data assembly throws, every bullet's scores are set to None (not crash)."""
     with patch("app.scoring._build_covered_word_sets", side_effect=RuntimeError("boom")):
@@ -589,10 +770,32 @@ def test_build_covered_word_sets_extracts_bold_titles(patch_db):
 def test_refdata_loads_terms_and_filters_null_tvl(patch_db):
     patch_db(
         "scoring",
-        get_entity_mention_map=[("Aave", ["aave", "aav"], 50)],
+        get_entity_mention_map=[("Aave", ["aave", "aav"], "protocol", 50)],
         get_protocol_tvls=[("Aave", 1.2e10), ("BadRow", None)],
     )
     ref = _RefData()
     assert "Aave" in {t for t, _ in ref.entity_terms}
+    assert "aav" in {t for t, _ in ref.entity_terms}   # short ticker kept via type+mentions
     assert ("Aave", 1.2e10) in ref.protocol_tvls
     assert all(t is not None for _, t in ref.protocol_tvls)   # None-tvl row dropped
+
+
+def test_refdata_rejects_generic_junk_aliases(patch_db):
+    """Junk single-word aliases ("Onchain", "Public") must not become corroboration
+    terms — they OR-match half the corpus and hand bullets a maxed s1/s3 on noise."""
+    patch_db(
+        "scoring",
+        get_entity_mention_map=[
+            ("Onchain", ["onchain"], "other", 1),
+            ("Public", ["public"], "other", 2),
+            ("Notional", ["notional"], "protocol", 2),
+            ("Morpho", ["morpho"], "protocol", 40),
+        ],
+        get_protocol_tvls=[],
+    )
+    ref = _RefData()
+    terms = {t.lower() for t, _ in ref.entity_terms}
+    assert "onchain" not in terms
+    assert "public" not in terms
+    assert "notional" not in terms
+    assert "morpho" in terms

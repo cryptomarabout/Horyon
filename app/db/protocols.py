@@ -161,6 +161,57 @@ def get_protocol_category_summary() -> list[dict]:
     ]
 
 
+def upsert_market_data(rows: list[dict]) -> None:
+    """Upsert CoinGecko market-data snapshot rows (price/mcap/FDV/supply) keyed by gecko_id."""
+    if not rows:
+        return
+    with _conn() as conn, conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO coingecko_market
+              (gecko_id, symbol, price_usd, market_cap_usd, fdv_usd,
+               circulating_supply, total_supply, market_cap_rank,
+               price_change_24h_pct, price_change_7d_pct, fetched_at)
+            VALUES %s
+            ON CONFLICT (gecko_id) DO UPDATE SET
+              symbol               = EXCLUDED.symbol,
+              price_usd            = EXCLUDED.price_usd,
+              market_cap_usd       = EXCLUDED.market_cap_usd,
+              fdv_usd              = EXCLUDED.fdv_usd,
+              circulating_supply   = EXCLUDED.circulating_supply,
+              total_supply         = EXCLUDED.total_supply,
+              market_cap_rank      = EXCLUDED.market_cap_rank,
+              price_change_24h_pct = EXCLUDED.price_change_24h_pct,
+              price_change_7d_pct  = EXCLUDED.price_change_7d_pct,
+              fetched_at           = now()
+            """,
+            [(r["gecko_id"], r.get("symbol"), r.get("price_usd"), r.get("market_cap_usd"),
+              r.get("fdv_usd"), r.get("circulating_supply"), r.get("total_supply"),
+              r.get("market_cap_rank"), r.get("price_change_24h_pct"), r.get("price_change_7d_pct"))
+             for r in rows],
+            template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())",
+        )
+
+
+def get_market_data_by_slugs(slugs: list[str]) -> list[dict]:
+    """Market-data snapshot for entities whose slug equals its CoinGecko id (see
+    coingecko_market's table comment for why that's a reliable, if partial, join key).
+    Only rows fetched in the last 3 days are returned — stale data degrades to absent
+    rather than showing a number an analyst can no longer trust."""
+    if not slugs:
+        return []
+    return _fetchall(
+        """SELECT gecko_id, symbol, price_usd, market_cap_usd, fdv_usd,
+                  circulating_supply, total_supply, market_cap_rank,
+                  price_change_24h_pct, price_change_7d_pct
+           FROM coingecko_market
+           WHERE gecko_id = ANY(%s) AND fetched_at > now() - INTERVAL '3 days'""",
+        (slugs,),
+        dict_rows=True,
+    )
+
+
 def get_protocol_tvl_movers(limit: int = 12) -> list[dict]:
     """Top protocols by absolute 7d TVL change (gainers + losers), min $10M TVL."""
     return _fetchall(

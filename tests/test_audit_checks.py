@@ -59,6 +59,31 @@ def test_overstatement_includes_context_snippet():
     assert out and "unstoppable" in out[0]["ctx"]
 
 
+# ── check_reasoning_leak (_REASONING_LEAK_RE) ────────────────────────────────
+
+def test_reasoning_leak_catches_brief_template_echo():
+    # 2026-07-07 incident shape: the entity-brief prompt's own format template echoed back
+    # ("Short title — What happened. Why it matters.") + "we"-voice planning. The old net
+    # missed all 6 contaminated briefs.
+    surfaces = [("brief", "Securitize",
+                 "Short title — What happened. Why it matters. We need to prioritize "
+                 "hacks/exploits over launches. Then governance.")]
+    out = audit.check_reasoning_leak(surfaces)
+    assert out and out[0]["kind"] == "brief" and out[0]["count"] >= 2
+
+
+def test_reasoning_leak_we_voice_planning_verbs():
+    surfaces = [("brief", "Jito", "We need to summarize the restaking coverage first.")]
+    assert audit.check_reasoning_leak(surfaces)
+
+
+def test_reasoning_leak_clean_brief_passes():
+    surfaces = [("brief", "Aave",
+                 "Aave V4 deposits on Base neared $160M, led by frxUSD. Watch the incentive "
+                 "program's next epoch. Jesse said 'we need to scale Base tenfold'.")]
+    assert audit.check_reasoning_leak(surfaces) == []
+
+
 # ── prelaunch_warnings (prelaunch_entities patched) ──────────────────────────
 
 def test_prelaunch_warnings_flags_uncurated_entity(monkeypatch):
@@ -89,3 +114,25 @@ def test_compile_patterns_is_word_boundary():
     pats = audit.compile_prelaunch_patterns({"arc": ["arc"]})
     assert pats["arc"].search("deploying on Arc")
     assert not pats["arc"].search("arcade machine")
+
+
+# ── _is_collision_risk (check_collision_risk's pure threshold decision) ─────
+
+def test_collision_risk_flags_the_firm_case():
+    # Inverse Finance's FiRM: mc=1, 'firm' hit 329x in ordinary feed prose.
+    assert audit._is_collision_risk(mention_count=1, feed_hits=329)
+
+
+def test_collision_risk_ignores_rare_words():
+    # below the absolute floor — could just be coincidence, not a pattern.
+    assert not audit._is_collision_risk(mention_count=1, feed_hits=10)
+
+
+def test_collision_risk_ignores_proportionate_coverage():
+    # common AND frequently mentioned in proportion — genuine coverage, not noise.
+    assert not audit._is_collision_risk(mention_count=50, feed_hits=60)
+
+
+def test_collision_risk_boundary_is_inclusive():
+    assert audit._is_collision_risk(mention_count=2, feed_hits=40)
+    assert not audit._is_collision_risk(mention_count=2, feed_hits=39)

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import EntityMapPanel from "./EntityMapPanel";
+import SearchPanel from "./panels/SearchPanel";
 import MapToolbar from "./entityGraph/MapToolbar";
 import EntityLeague from "./entityGraph/EntityLeague";
 import IndexInfo from "./entityGraph/IndexInfo";
@@ -10,6 +11,7 @@ import { renderNetwork } from "./entityGraph/renderNetwork";
 import {
   TYPES, METRICS, DEFAULT_METRIC, DEFAULT_LEVEL, DEFAULT_VIEW, edgeKey,
 } from "../../lib/entityGraph";
+import useHeaderSearch from "../../lib/useHeaderSearch";
 import useMobilePanelBack from "../../lib/useMobilePanelBack";
 import EmptyState from "./ui/EmptyState";
 
@@ -30,6 +32,11 @@ export default function EntityGraph({ nodes = [], edges = [], league = [] }) {
   const containerRef = useRef(null);
   const svgRef = useRef(null);
   const viewRef = useRef(null);
+
+  // Global header search (NavSearch) works on every route — see useHeaderSearch.
+  // Takes priority over a selected node/edge while active, mirroring NarrativeView +
+  // RightPanel's own search-first precedence, so the two panels never fight.
+  const { searchProp, clearSearch } = useHeaderSearch();
 
   // ── Derived data ─────────────────────────────────────────────────────────
   const { minMc, maxMc } = useMemo(() => {
@@ -98,7 +105,12 @@ export default function EntityGraph({ nodes = [], edges = [], league = [] }) {
     setPanelOpen(true);
   }, []);
   const clearSelection = useCallback(() => { setSelected(null); setPanelOpen(false); }, []);
-  useMobilePanelBack(panelOpen, clearSelection);
+  const closePanel = useCallback(() => {
+    if (searchProp) clearSearch();
+    else clearSelection();
+  }, [searchProp, clearSearch, clearSelection]);
+  const showPanel = panelOpen || !!searchProp;
+  useMobilePanelBack(showPanel, closePanel);
   const focusEntity = useCallback((slug) => {
     const n = nodeBySlug.get(slug);
     if (n) selectNode(n);
@@ -344,13 +356,17 @@ export default function EntityGraph({ nodes = [], edges = [], league = [] }) {
         )}
       </div>
 
-      <div className={`feed-right${panelOpen ? " panel-open" : ""}`}>
-        <EntityMapPanel
-          selected={selected}
-          neighbors={panelNeighbors}
-          onClose={clearSelection}
-          onFocusEntity={focusEntity}
-        />
+      <div className={`feed-right${showPanel ? " panel-open" : ""}`}>
+        {searchProp ? (
+          <SearchPanel search={searchProp} />
+        ) : (
+          <EntityMapPanel
+            selected={selected}
+            neighbors={panelNeighbors}
+            onClose={clearSelection}
+            onFocusEntity={focusEntity}
+          />
+        )}
       </div>
     </div>
   );

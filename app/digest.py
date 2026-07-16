@@ -15,28 +15,19 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from . import analyst, config, db, entities, entity_brief, llm, prompts, scoring
+from . import analyst, config, db, entities, entity_brief, llm, prompts, scoring, util
 from .telegram_html import sanitize
 
 log = logging.getLogger(__name__)
 
-_TAG_RE = re.compile(r"<[^>]*>")
-
 # ── HTML bullet parser (mirrors web/lib/digest.js parseDigest) ─────────────
-_HTML_ENTITIES = {
-    "&amp;": "&", "&lt;": "<", "&gt;": ">",
-    "&quot;": '"', "&#39;": "'", "&apos;": "'", "&nbsp;": " ",
-}
-
-
-def _decode(s: str) -> str:
-    return re.sub(r"&[a-z#0-9]+;", lambda m: _HTML_ENTITIES.get(m.group(), m.group()), s)
+_decode = util.decode_entities
 
 
 def _strip_tags(s: str) -> str:
-    return re.sub(r"<[^>]+>", "", s)
+    return util.TAG_RE.sub("", s)
 
 
 def _parse_digest_bullets(html: str) -> list[dict]:
@@ -137,10 +128,32 @@ def _build_dedup_context(
 
 
 def _clean_text(content: str) -> str:
-    text = _TAG_RE.sub("", content or "")
-    text = re.sub(r"\s+", " ", text).strip()
+    text = util.TAG_RE.sub("", content or "")
+    text = util.WS_RE.sub(" ", text).strip()
     text = text.replace('"', "'")
     return text[:2000]
+
+
+# Per-item quality annotations for the digest prompt, keyed on the ingest-time
+# quality_flag (title_content_coherence_check). thin_content is a MIX of genuine
+# short signals ("Base just faced a consensus issue…") and pure teaser links
+# ("Learn more: gauntlet.xyz/…"), so those items are kept but the model is told
+# not to pad them — padding a 2-sentence bullet out of a 60-char teaser is the
+# main confabulation vector. boilerplate_title marks multi-story newsletter
+# recaps that must not be re-reported as a fresh single event. Self-contained
+# NOTE text (no matching rule needed in _DIGEST_RULES); unknown/ok flags add nothing.
+_QUALITY_NOTES = {
+    "thin_content": (
+        "NOTE: LOW-DETAIL SOURCE — a very short post or teaser link. Report ONLY what "
+        "TEXT literally states; if it names no concrete event, discard it. Never pad, "
+        "infer, or guess what is behind its link."
+    ),
+    "boilerplate_title": (
+        "NOTE: NEWSLETTER/ROUNDUP — a multi-story recap that may restate old news. Do "
+        "not report it as a fresh single event; use it only for a story TEXT itself "
+        "states, and prefer a dedicated source covering the same story."
+    ),
+}
 
 
 def _format_items(rows: list[dict]) -> str:
@@ -149,12 +162,16 @@ def _format_items(rows: list[dict]) -> str:
         text = _clean_text(r.get("content", ""))
         if len(text) <= 40:
             continue
-        blocks.append(
+        block = (
             f"TYPE: {(r.get('source_type') or '').upper()}\n"
             f"TEXT: {text}\n"
             f"LINK: {r.get('link', '')}\n"
             f"CREATOR: {r.get('creator', '')}"
         )
+        note = _QUALITY_NOTES.get(r.get("quality_flag") or "ok")
+        if note:
+            block += f"\n{note}"
+        blocks.append(block)
     return "\n\n---\n\n".join(blocks)
 
 
@@ -208,6 +225,11 @@ def _keep_bullets_only(body: str) -> str:
 
 def _count_bullets(body: str) -> int:
     return sum(1 for ln in (body or "").split("\n") if _BULLET_LINE_RE.match(ln))
+
+
+# Anti-injection/hallucination href allowlist lives in util (shared with the entity brief).
+_strip_foreign_hrefs = util.strip_foreign_hrefs
+_norm_link = util.norm_link
 
 
 # Patterns that indicate the LLM emitted placeholder or garbled output.
@@ -336,9 +358,14 @@ def build_digest() -> tuple[str, str, str]:
     # Generate; validate output structure; retry once on HIGH-severity failures.
     model = ""
     body = ""
+    # Allowlist of legitimate source URLs = the input items' own LINK fields. Any output
+    # <a href> outside this set is a planted (link-swap injection) or invented URL and is
+    # unwrapped to plain text (deterministic backstop to the prompt's UNTRUSTED INPUT rail).
+    allowed_links = {r["link"] for r in rows if r.get("link")}
     for attempt in range(2):
         raw, model = llm.complete(prompts.DIGEST_SYSTEM, user, temperature=0.5)
         body = _keep_bullets_only(sanitize(raw))
+        body = _strip_foreign_hrefs(body, allowed_links)
         body, n_removed = _post_filter_duplicates(body, covered_bullets)
         if n_removed:
             log.info("post-filter: removed %d duplicate bullet(s)", n_removed)
@@ -444,6 +471,54 @@ def orchestrate_post_digest(html: str, raw_digest: str, trigger: str) -> None:
     log.info("Post-digest orchestration finished for %s.", today.isoformat())
 
 
+# ── T17 same-day digest self-heal ────────────────────────────────────────────
+# The 07:00 cron builds the digest once; a bad five minutes there (NVIDIA NIM down +
+# OpenRouter 429s, 2026-07-08) left the whole day's pipeline empty until a manual rerun.
+# The 20-min ingest cycle reruns the build later in the day when the morning attempt
+# left no good digest. Pure decision below; the effecting side lives in main._ingest_job.
+DIGEST_RETRY_MAX = 3            # attempts per day (beyond the 07:00 cron)
+DIGEST_RETRY_GAP_MIN = 60       # minimum spacing between retries
+DIGEST_RETRY_EARLIEST_UTC = (7, 20)  # never before this — give the cron time to finish/fail
+
+
+def _digest_succeeded(attempts: "list[dict]") -> bool:
+    """A day is done once any attempt persisted real content with no error."""
+    return any(a.get("error") is None and a.get("has_content") for a in attempts)
+
+
+def should_retry_digest(
+    attempts: "list[dict]",
+    now_utc: datetime,
+    *,
+    max_retries: int = DIGEST_RETRY_MAX,
+    gap_min: int = DIGEST_RETRY_GAP_MIN,
+    earliest_utc: "tuple[int, int]" = DIGEST_RETRY_EARLIEST_UTC,
+) -> bool:
+    """Pure T17 decision: should a same-day digest retry run right now?
+
+    `attempts` = today's crypto_digest rows as dicts (created_at, trigger, error,
+    has_content), any order — see db.get_digest_attempts. Returns True iff:
+      * it is at/after `earliest_utc` (07:20 UTC) — the 07:00 cron has had time to
+        succeed or fail, so a missing row means genuine failure, not mid-build;
+      * no attempt today produced a good digest (guardrail: never rebuild a good day);
+      * fewer than `max_retries` retry attempts have been made today; and
+      * the last retry (if any) was ≥ `gap_min` minutes ago. The FIRST retry is gated
+        only by the window above, so it can fire at 07:20 right after a 07:00 failure.
+    """
+    if (now_utc.hour, now_utc.minute) < earliest_utc:
+        return False
+    if _digest_succeeded(attempts):
+        return False
+    retries = [a for a in attempts if a.get("trigger") == "retry"]
+    if len(retries) >= max_retries:
+        return False
+    if retries:
+        last = util.as_utc(max(r["created_at"] for r in retries))
+        if now_utc - last < timedelta(minutes=gap_min):
+            return False
+    return True
+
+
 def run_digest(trigger: str = "manual") -> str:
     """Build, persist, and return the Telegram-HTML digest.
 
@@ -512,6 +587,39 @@ def _related_coverage(title: str, anchor_names: list[str], own_link: str = "") -
     except Exception:
         log.debug("bullet analysis: related-coverage lookup failed (non-fatal)", exc_info=True)
     return out
+
+
+# Reasoning-model leak guard (2026-07-03 incident, see app/briefing.py for the fuller writeup):
+# a reasoning fallback model can emit its own planning/meta-commentary about THIS prompt's
+# instructions instead of (or mixed into) the actual analysis, and unlike every other LLM
+# write-path in this codebase (threads/podcasts/entity_brief/briefing), this one had NO guard at
+# all — the raw completion was stored verbatim. `app/audit.py`'s retrospective scan found this
+# already live in 14/347 stored analyses (since 2026-06-04), e.g. "We need to produce 3-4
+# sentences of additional context: background..." — a near-verbatim echo of BULLET_ANALYST_SYSTEM
+# itself. Phrases are anchored to THIS prompt's specific vocabulary ("context blocks", "must not
+# invent", "preserve temporal modality" as a META reference rather than just followed) to keep
+# collision risk with genuine 3-4 sentence analyst prose near zero — validated against all 347
+# historical stored analyses: 0 false positives, catches all 14 contaminated rows.
+_ANALYSIS_LEAK_RE = re.compile(
+    r"\bmust not invent\b|\bwe can mention\b|\bwe can include\b|"
+    r"\bthe user wants\b|\bcontext blocks?\b|\bpreserve temporal modality\b|"
+    r"\bwe need to (?:write|produce|generate|create|extract|summarize|be present)\b|"
+    r"\bi need to (?:write|produce|generate|create|extract|summarize)\b|"
+    r"\blet me (?:think|write|draft|extract|summarize|parse|note)\b|"
+    r"\bi should (?:write|produce|generate|extract|summarize|note|parse)\b",
+    re.IGNORECASE,
+)
+
+
+def _clean_analysis(content: str) -> str:
+    """Strip a <think> block, then reject the whole completion if it still reads as leaked
+    planning/meta-commentary rather than the asked-for analyst prose. Returns '' on a leak (the
+    caller then treats it exactly like any other LLM failure for this bullet: log + skip — a
+    dropped analysis beats a garbled one reaching the web UI's Analyst Note panel)."""
+    text = llm.strip_think(content)
+    if _ANALYSIS_LEAK_RE.search(text):
+        return ""
+    return text
 
 
 def _generate_one_analysis(bullet: dict) -> dict:
@@ -626,7 +734,11 @@ def _generate_one_analysis(bullet: dict) -> dict:
         user = f"{entity_context}\n\n{user}"
         
     content, model = llm.complete(prompts.BULLET_ANALYST_SYSTEM, user, max_tokens=350, temperature=0.3)
-    return {**bullet, "analysis": content.strip(), "model_used": model}
+    analysis = _clean_analysis(content)
+    if not analysis:
+        raise RuntimeError(f"bullet analysis: reasoning leak or empty completion for {title!r} "
+                           f"(model={model})")
+    return {**bullet, "analysis": analysis, "model_used": model}
 
 
 def generate_and_store_bullet_analyses(digest_date, html: str) -> int:

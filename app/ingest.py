@@ -11,15 +11,13 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import feedparser
 
-from . import config, db, entities
+from . import config, db, entities, util
 from .feeds import FEED_NAMES, SOURCES
 
 log = logging.getLogger(__name__)
 
 _UA = "Mozilla/5.0 (compatible; Horyon/1.0; +https://github.com)"
 _STATUS_ID_RE = re.compile(r"/status/\d{10,}")
-_TAG_RE = re.compile(r"<[^>]*>")
-_WS_RE = re.compile(r"\s+")
 _MENTION_RE = re.compile(r"@([A-Za-z0-9_]{1,50})")
 MIN_TEXT_LEN = 40
 
@@ -83,7 +81,7 @@ def title_content_coherence_check(title: str, content: str) -> str:
     Never raises. Pure Python — no LLM, no embedding.
     """
     try:
-        plain = _WS_RE.sub(" ", _TAG_RE.sub(" ", content or "")).strip()
+        plain = util.plain_text(content)
         if len(plain) < 80:
             return "thin_content"
         t = (title or "").strip()
@@ -94,11 +92,6 @@ def title_content_coherence_check(title: str, content: str) -> str:
     except Exception:
         pass
     return "ok"
-
-
-def _plain(html: str) -> str:
-    """Strip tags + collapse whitespace, for length/RT filtering."""
-    return _WS_RE.sub(" ", _TAG_RE.sub(" ", html or "")).strip()
 
 
 def _entry_content(entry) -> str:
@@ -177,7 +170,7 @@ def clean_items(raws: list[dict]) -> list[dict]:
         content = r.get("content") or ""
         creator = r.get("creator") or ""
         is_twitter = "x.com" in link
-        text = _plain(content)
+        text = util.plain_text(content)
 
         if is_twitter:
             feed_name = creator
@@ -232,8 +225,7 @@ def sanitize_items(cleaned: list[dict]) -> list[dict]:
             try:
                 pd_dt = datetime.fromisoformat(pd)
                 # Make aware if naive (feedparser sometimes returns naive UTC)
-                if pd_dt.tzinfo is None:
-                    pd_dt = pd_dt.replace(tzinfo=timezone.utc)
+                pd_dt = util.as_utc(pd_dt)  # feedparser sometimes returns naive UTC
                 if pd_dt > now:
                     pd = now_iso
             except (ValueError, TypeError):

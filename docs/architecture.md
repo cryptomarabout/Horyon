@@ -107,6 +107,14 @@ Deleted: `Sidebar.js`, `NavMenus.js`, `MobileMenuButton.js`. The narrative-first
 
 ## Intelligence pipeline
 
+> 2026-07-07 hardening: a daily **audio-retention** cron NULLs `digest_audio` bytes older than
+> `AUDIO_RETENTION_DAYS` (60 — scripts/chapters/metadata kept forever); governance proposals past `end_ts`
+> auto-close at each Snapshot fetch (`db.close_expired_proposals`); briefing + entity-brief LLM calls route
+> around reasoning models (`llm.complete(..., skip_reasoning=True)` / `config.REASONING_MODELS`); a briefing
+> variant whose script can't be produced stores a retryable `status='failed'` row (`blocked` stays terminal);
+> narrative momentum recalibrated against the measured ρ distribution (heating ρ≥1.15 ∧ R≥0.5, cooling on
+> silent-with-baseline, forming ≤96h/n≤4).
+
 Post-digest, fail-silently, never breaks the digest. Side-effects run through
 **`orchestrate_post_digest(html, raw, trigger)`** — sequential, per-step-retry (2×): analyst extraction →
 bullet analyses (+ importance scoring) → entity briefs → `db.decay_stale_entities()` → narrative rebuild →
@@ -130,16 +138,35 @@ Twitter thread render → og card cache → audio briefing render — all 3 leng
   `generate_and_store_bullet_analyses` (backfill + regen get it free), best-effort (score=None on failure).
   **Fully deterministic — NO LLM** (the LLM calibration/ranking passes were removed: cost + rate-limit risk for
   little signal). Pipeline: **(1)** 6 positive signals + 1 penalty — s1 corroboration = SUM of source CREDIBILITY
-  weights 0–25 (`source_count` = distinct domains), s2 financial magnitude 0–20, s3 appearance velocity 0–15,
-  s4 entity weight (DeFiLlama TVL or `entity_memory.mention_count`) 0–20, s5 keyword criticality 0–15 (max
-  bucket: hacks=15; governance + **funding/M&A** raise/acquire/merger=11; launch/upgrade=7; partnership=3),
-  s6 novelty vs last 7d (semantic Jaccard) 0–5, **s7 saturation PENALTY 0…−12** (subtract when a
+  weights 0–25 (**log-spaced bands recalibrated 2026-07-11 (T1)** against the measured credibility-sum
+  distribution: a 30-day replay showed the sum ranges 0…90 while the old bands topped out at ≥3–4, so **83% of
+  bullets hit 25 and every daily top-5 bullet scored 25** — s1 did no ranking work. New bands roughly double each
+  step: M≥3.0→25, sum≥24→25, ≥12→21, ≥6→17, ≥3→13, ≥1.5→9, ≥0.8→5, ≥0.4→2. **A single premium Kaiko item (3.0)
+  still tops the band** via the `max≥3.0` override; **three unknown Tier-2 accounts (sum 3.0) cap at 13**, nowhere
+  near max — the republication attack; `source_count` = distinct source **keys**,
+  not domains — the old domain count collapsed every Twitter source into one `nitter.net`), s2 financial magnitude
+  0–20 (**scans the bullet's OWN text only** — scanning corroborating items imported ambient "$1B" figures from
+  adjacent tweets, half the corpus maxed it), s3 appearance velocity 0–15 (**earliest item per DISTINCT source** —
+  one account re-posting 5× is not velocity), s4 entity weight (DeFiLlama TVL or `entity_memory.mention_count`)
+  0–20, s5 keyword criticality 0–15 (max bucket: hacks/**phishing/stolen/theft/seized**=15; governance +
+  **funding/M&A** raise/acquire/merger/**shuts/buys/ipo**=11; launch/upgrade/**debut/listing/testnet**=7;
+  partnership=3), s6 novelty vs last 7d **graded 0/2/5** (2026-07-11: was binary 5/0 and a constant +5 for
+  195/213 replay bullets — the strict digest pre-filter already dropped hard dups, so `_is_near_duplicate` never
+  fired against prior *titles*; now `_is_soft_echo` (Jaccard 0.30–0.45 or ≥2 shared words below the near-dup
+  ratio, chain-disjoint titles excluded) adds a middle tier: 5 fresh · 2 soft echo of recent coverage · 0
+  near-dup), **s7 saturation PENALTY 0…−12** (subtract when a
   protocol already dominates recent coverage — covered on ≥5 of last 7 digest days → −12, ≥3 → −7; **bypassed**
   when s5≥15 (hack) or s2≥16 (≥$500M) so real news is never buried; counters the rich-get-richer mention/TVL
   loop that let Aave/Morpho/Pendle recur) → `P=max(0,min(100,Σ)−s7)`. **(2)** credibility penalty: ×0.5 when
-  the only sources are Tier-3 clickbait. **(3)** temporal decay `max(0.75, 1−age_h/48*0.25)`. Feed/decay windows
-  anchor to the **digest date** (works for backfill). **Source credibility** (`FEED_CREDIBILITY`, keyed by domain
-  or Twitter handle via `get_source_key`): Tier 1 = 1.2, Tier 2 = 1.0, Tier 3 clickbait = 0.4. `score_breakdown`
+  the only sources are Tier-3 clickbait. **(3)** temporal decay `max(0.75, 1−age_h/48*0.25)`. Corroboration/velocity
+  read a **48h** feed window (was 24h — the cliff zeroed s1/s3 for ~12% of bullets whose story broke the previous
+  morning; decay discounts age instead) anchored to the **digest date** (works for backfill). Entity corroboration
+  terms pass the shared `entities.matchable_term` gate (junk single-word aliases like "Onchain"/"Notional"
+  OR-matched half the corpus); **entity-less bullets** (fallback `_significant_words` terms) only count items
+  matching **≥2 distinct terms** — "volume" alone corroborates nothing. **Source credibility** (`FEED_CREDIBILITY`,
+  keyed by domain or Twitter handle via `get_source_key`): Tier 1 = 1.2, Tier 2 = 1.0, Tier 3 clickbait = 0.4 —
+  the Tier-1 news outlets are keyed **both** as domains and as their Twitter handles (@theblockco etc.; items
+  arrive via nitter as handles, so domain-only keys silently downgraded ~80% of their volume). `score_breakdown`
   still carries `llm_adjustment`/`position_bonus` (always 0) for back-compat. Synchronous (all via `db.*`). UI:
   `importance_score` shown as a **flat score badge** (`ScoreBadge` in `BulletItem.js` — tabular tier-coloured
   number over a thin fill bar `width:score%`); `source_count` → "N sources" badge + 1–3 gold dots.
@@ -174,6 +201,32 @@ Twitter thread render → og card cache → audio briefing render — all 3 leng
   (strip `<think>` + preamble before first 🔎/• line) and **rejects** a brief with no `•` (returns None → no
   cache). Before this a reasoning fallback model cached its raw chain-of-thought for ~half the
   entities. `max_tokens=900` so a reasoning model has room to think *and* emit.
+  **Format-drift self-heal (2026-07-05):** the model doesn't always follow the "🔎 header / • bullet"
+  template literally — it can merge the header + first bullet onto one line via an inline " • " separator,
+  or mark continuation bullets with "-" instead of "•". Both are invisible to a reader but broke every
+  consumer that only recognized a literal line-**leading** "•" (web `SearchPanel.parseTelegramLines`,
+  Telegram render) — an unrecognized line rendered as nothing, not an error, so a drifted brief silently
+  looked like an empty search result (measured: 0 of 20 sampled briefs had a compliant bullet line before
+  the fix). `_normalize_brief_format` canonicalizes both patterns before storage; `_clean_brief` always
+  applies it; `python3 -m app.entity_brief --renormalize` fixes the existing backlog in place with zero LLM
+  calls. The web parser also stays lenient as a second line of defense. **Incremental top-up (2026-07-05):**
+  `refresh_stale_briefs` runs on a 3h cron between digests — self-limiting: only entities that already have
+  a brief (discovery of new entities stays the daily digest's job), whose brief predates the window, AND
+  that have ≥2 new anchored feed mentions since then, get regenerated, capped at 15 per run. A quiet news
+  cycle costs zero LLM calls. **Market-data facts (2026-07-05):** `coingecko_market` (2h cron,
+  `defillama.fetch_and_store_market_data`, top-500-by-mcap CoinGecko snapshot) adds price/mcap/FDV/
+  circulating-supply to the brief's VERIFIED DATABASE FACTS block, joined by `gecko_id == entity_memory.slug`
+  — the same identity `fetch_and_seed_coingecko` already relies on. This is an exact-slug join, not a
+  brand-aggregation one (mirrors the existing DeFiLlama TVL lookup's known gap): ~150 tracked entities match
+  directly; an entity whose slug doesn't happen to equal its CoinGecko id gets no market line rather than a
+  guessed one. Also surfaced client-side in the Atlas node panel's Fundamentals block
+  (`EntityMapPanel.ProtocolFundamentals`, joined the same way in `getEntityGraph`).
+  **Search wiring (2026-07-05):** the global header search (`NavSearch`, a DOM CustomEvent bus) only answers
+  on a page that mounts `useHeaderSearch`/`useFeedSearch` + renders a `SearchPanel` — this was missing on
+  Atlas (`EntityGraph.js`) and Weekly (`WeeklyView.js`), so the search bar silently did nothing there even
+  though it worked on Daily/Research. Both now wire it in: Atlas prioritizes the search panel over node
+  selection in its existing `feed-right`; Weekly (a deliberate no-right-panel "solo" report) renders the
+  panel only while a search is active.
 - **`digest_threads`** (`app/threads.py`) — the daily digest as a ready-to-post Twitter/X thread. ONE row per
   date (last step of `orchestrate_post_digest` + CLI). **Intelligence-Brief format: curated TOP-5, NOT one tweet
   per bullet** — `build_thread_for_date` caps `_ordered_bullets` to `OG_CARD_BULLETS` (=5) so the thread mirrors
@@ -304,7 +357,16 @@ Twitter thread render → og card cache → audio briefing render — all 3 leng
   after the digest text.
 - **`weekly_digest`** — macro report (market + DeFi + 7d news); injects last 3 weekly digests for trend
   continuity; `rotation`: BTC/ETH/ALT/MIXED. DEX weekly volume endpoint 500s on the free DeFiLlama plan
-  (handled). **Cadence (two distinct jobs):** no standalone weekly *build* cron. (1) the daily digest cron (07:00
+  (handled). **Weekly v2 — sectioned composition (T12, `config.WEEKLY_SECTIONED` default on):** movers (🏆) and
+  ROTATION are built DETERMINISTICALLY from exact market data (`weekly.build_movers_block` = exactly 5+5;
+  `weekly.compute_rotation`), and the five prose sections (market/defi/trending/stories/watch) are separate
+  small LLM completions with shared rails (`prompts.WEEKLY_SECTIONS` + `_WEEKLY_SECTION_RAILS`), each retried
+  alone (`weekly.validate_weekly_section`). Both the sectioned and legacy monolithic paths share
+  `prompts._weekly_data_blocks` so grounding is identical; assembled output is byte-compatible (same emoji
+  headers/order) so `web/lib/weekly.js` is untouched. The single-call path (`WEEKLY_SYSTEM`) is the fallback,
+  used on any section failure or overall-validation fail. Em dashes stripped at the data layer
+  (`weekly._deslop`) in addition to the prompt ban + web `deDash`. **Cadence (two distinct jobs):** no standalone
+  weekly *build* cron. (1) the daily digest cron (07:00
   UTC) fires `_do_weekly_update` → `run_weekly()` for the current in-progress week (`_current_week()`) — a rolling
   preview for the web `/weekly` view, skipped until the week has ≥2 daily digests. (2) `weekly_tg_send` (Mon 07:45
   UTC) sends to Telegram the report for the **week that JUST ENDED** — looks up by *yesterday* (Sunday) via
@@ -323,9 +385,19 @@ Twitter thread render → og card cache → audio briefing render — all 3 leng
   the notes → reduce → a stored field. `_parse_analysis` also strips `<think>` before JSON-parse and meta-filters
   every field. Summary is embedded (768-dim) + run through the shared entity extractor. Recent claims/predictions
   feed the daily digest via `db.get_recent_podcast_summaries(48h)` → `prompts.format_podcast_context`. Channel
-  list in `config.PODCAST_CHANNELS`; `config.PODCAST_MIN_DATE` skips old episodes. **Web UI:** podcasts are inline
+  list in `config.PODCAST_CHANNELS` (8 crypto-native channels; unresolvable handles skip non-fatally);
+  `config.PODCAST_MIN_DATE` skips old episodes. **Web UI:** podcasts are inline
   daily-news rows — episodes published that UTC day (`lib/db.getPodcastsForDate`) render as `PodcastFeedItem`,
   filterable via the Podcasts chip; click opens `PodcastPanel`.
+- **`podcast_predictions`** (T14, `app/podcasts.py`) — forward-looking claim tracking, the only place the system
+  follows up on predictions. Filled at summarize time (`_store_predictions`) from the existing reduce pass's
+  `predictions` list, with each claim's entities resolved by the shared vetted detector (no new LLM path). A
+  monthly DETERMINISTIC recheck (`recheck_predictions`, 1st-of-month 06:30 UTC cron + `--recheck-predictions`
+  CLI) word-boundary-matches each open prediction's entities against LATER digest coverage
+  (`db.get_digest_bullets_matching_since`) and sets `outcome` = `corroborated` (coverage appeared, with
+  `evidence` [{date,title}]) or `stale` (past `PODCAST_PREDICTION_STALE_DAYS` with none). It is an honest
+  "coverage appeared" signal, NEVER an LLM verdict on whether the call was right.
+  `db.get_predictions_for_research` is the (as-yet-unwired) reader for a Research-page "called it" module.
 
 **Dedup** (daily digest): URL pre-filter (drop items whose URL appeared in last 7d digests) + Python post-filter
 (normalized title fingerprint: first 6 significant words, lowercased, emoji-stripped) + `covered_bullets`
@@ -349,14 +421,22 @@ Fully standalone — migrated off n8n. Do not reintroduce n8n tables, containers
   high priority; ETF/TradFi/treasury items still HARD-DISCARDED).
   `build_digest` also injects an **OVER-COVERED PROTOCOLS** block (`_saturated_entities`: protocols covered on
   ≥3 of the last 7 digest days) telling the model to apply a higher bar to those — only hack/governance/launch/
-  big-flow stories clear it, routine yield/rate/TVL updates are dropped (thins the Aave/Morpho/Pendle drumbeat). **⚠️ EVERY digest-persist path MUST apply `_keep_bullets_only` + a `"•" in
+  big-flow stories clear it, routine yield/rate/TVL updates are dropped (thins the Aave/Morpho/Pendle drumbeat).
+  `_format_items` reads each item's `quality_flag` and appends a per-item `NOTE:` for `thin_content` (report
+  ONLY what TEXT states, never pad a teaser) and `boilerplate_title` (multi-story newsletter recap — not a fresh
+  event); the flag comes back from `get_recent_feed_items`/`get_feed_items_for_date` ('ok' pre-migration). **⚠️ EVERY digest-persist path MUST apply `_keep_bullets_only` + a `"•" in
   body` guard** (else a reasoning fallback model leaks chain-of-thought into the stored digest). Bullet analyses
   run at `max_workers=3`. Post-digest side-effects → `orchestrate_post_digest` (see pipeline above).
 - `scoring.py` — bullet importance scoring (0–100) + `source_count`: 6 positive signals + s7 saturation penalty
   → credibility penalty → temporal decay. NO LLM. See pipeline above.
 - `specialized.py` — ReAct agent with `search_feed` tool; checks `entity_intel_brief` cache first.
-- `entity_brief.py` — post-digest entity brief generation: word-boundary match in digest text → up to 5 parallel
-  LLM calls → upsert `entity_intel_brief`.
+  `search_feed` excludes `thin_content` rows and the injected analyst notes carry the shared
+  `prompts.ANALYST_NOTES_LABEL` provenance label (model-generated, unverified).
+- `entity_brief.py` — post-digest entity brief generation: SHARED-detector match in digest text
+  (`entities.detect_entities_in_text` — same false-positive gates as every other surface) → up to 5 parallel
+  LLM calls → upsert `entity_intel_brief`. A per-entity `_entity_anchor` pattern (name + distinctive aliases,
+  ambiguous single-word brands case-sensitive) gates today's bullets, the 14-day history and the `search_feed`
+  results, so an unanchored ANN hit can't attribute another protocol's event to the entity (fail-open on error).
 - `entities.py` / `analyst.py` — entity extraction (ingest-time LLM) + analyst scratchpad (post-digest theme
   extraction, digest chain + notes formatter).
 - `known_facts.py` — **curated, human-authored ground-truth facts** about entities the LLM keeps getting wrong
@@ -388,8 +468,19 @@ Fully standalone — migrated off n8n. Do not reintroduce n8n tables, containers
   free), chain TVL daily + protocol TVL every 2h + CoinGecko top-500 logo seed.
 - `snapshot.py` — Snapshot DAO governance via GraphQL; top 500 verified spaces cached 24 h in-process; up to 50
   active proposals sorted by soonest ending; upserts every 30 min.
-- `podcasts.py` — YouTube transcripts → map-reduce LLM analysis → `podcast_episodes`. CLI: `python -m
-  app.podcasts [--resolve @handle | --no-persist | --limit N]`.
+- `podcasts.py` — YouTube transcripts → map-reduce LLM analysis → `podcast_episodes`; also fills
+  `podcast_predictions` + the deterministic `recheck_predictions` follow-through (T14). CLI: `python -m
+  app.podcasts [--resolve @handle | --no-persist | --limit N | --recheck-predictions]`.
+- `eval_harness.py` — **scored LLM grounding + prompt-injection eval (T10/T11)**. Each write-path (digest,
+  analyst, brief, thread, briefing, narrative) runs against a FIXED synthetic fixture; output scored by
+  deterministic checks (`urls_grounded`, `numbers_grounded` via `narratives._significant_numbers`,
+  `modality_ok` via `audit.modality_violations`, `format_parses` by the path's own consumer, `no_ai_isms`,
+  digest `no_body_em_dash`). A permanent injection case set (`INJECTION_CASES`: override + `PWNED-CANARY-93`,
+  format-escape, fact-plant, link-swap) runs against the three raw-text paths and asserts `canary_absent` +
+  `planted_urls_absent` + modality holds. Rows persist to `eval_runs` (shared `run_at`); weekly cron
+  Sun 20:10 UTC + on demand. URL primitives (`URL_RE`/`url_key`/`url_keys`) single-sourced here and imported by
+  `scripts/llm_quality_audit.py`. CLI: `python3 -m app.eval_harness [--path P|--case C|--no-persist]`. One run
+  at a time (process-local LLM limiter).
 - `narratives.py` — narrative intelligence layer. CLI: `python -m app.narratives [--days N|--no-persist|--no-llm]`.
   `_EntityMatcher` gates every term through `entities.matchable_term`.
 - `entity_graph.py` — entity co-occurrence precompute for the Entity Map. Scans the last `ENTITY_GRAPH_DAYS` (45)
@@ -406,21 +497,33 @@ Fully standalone — migrated off n8n. Do not reintroduce n8n tables, containers
   worker thread (`_run_async`) with a hard timeout.
 - `llm.py` / `prompts.py` — **multi-provider LLM client**: `_model_chain()` = NVIDIA NIM (`NIM_MODELS`, if
   `NIM_API_KEY` set) **then** OpenRouter (`OPENROUTER_MODELS`); `_chat()` tries each in order, retries brief
-  5xx/conn blips once, falls through on any error, per-request timeout `LLM_TIMEOUT_SEC` (60s). `complete(system,
+  5xx/conn blips once, falls through on any error, per-request timeout `LLM_TIMEOUT_SEC` (60s; callers may
+  override per request — `complete(..., timeout=)`, used by briefing scripts with
+  `BRIEFING_LLM_TIMEOUT_SEC=180` since a 7200-token draft can't finish in 60s). `complete(system,
   user, max_tokens, temperature=None, json_mode=False)`: low temperature for JSON/format (~0.1–0.3), ~0.5 for
   prose; `json_mode=True` sends `response_format=json_object` (**never for array-returning prompts**).
   `parse_json_loose()` extracts the first balanced `{…}`/`[…]`; on a truncated response it **salvages** the
-  parseable prefix via `_salvage_json`. **all prompts live in `prompts.py` only**; `complete()`/`run_agent()`
-  return `(content, model_used)`.
+  parseable prefix via `_salvage_json`. `strip_think()` is the shared `<think>`-block strip primitive every
+  persist path runs before its own content guard. **all prompts live in `prompts.py` only**;
+  `complete()`/`run_agent()` return `(content, model_used)`.
+- `util.py` — shared stdlib-only pure helpers (`plain_text`, `fmt_usd`, `decode_entities`, `as_utc`,
+  `TAG_RE`/`WS_RE`, `strip_foreign_hrefs`/`norm_link` — the outward-surface href allowlist used by the digest +
+  entity brief to unwrap planted/hallucinated links, 2026-07-16); replaced per-module copies 2026-07-15 (see
+  Conventions "Shared pure primitives"). Contract suite `tests/test_util.py`.
 - `db/` (package) / `embeddings.py` / `memory.py` / `feeds.py` / `telegram_html.py` / `monitor.py` /
   `backfill_digests.py` — DB pool + all CRUD, Ollama embed (768-dim), per-chat history, ~99 feed sources, HTML
   sanitizer + 4096-char splitter, Flask dashboard, historical digest + analysis backfill.
   **`db/` is a domain-split package** (it grew past 1.7k lines as one file): `_core` holds the connection pool,
   the `_conn` context manager, and the `_fetchall`/`_fetchone`/`_execute` helpers; the domain modules
   (`feeds`, `digest`, `protocols`, `entities`, `analysis`, `threads`, `audio`, `weekly`, `governance`,
-  `podcasts`, `narratives`) each own their tables' queries and import only from `_core`. `db/__init__.py`
+  `podcasts`, `narratives`, `evals`) each own their tables' queries and import only from `_core`. `db/__init__.py`
   re-exports every public function (and `_conn`) flat, so callers keep doing `from . import db` → `db.foo()`
   with no change. Put a NEW query in the module that owns its table; don't recreate a monolithic `db.py`.
+  **`monitor.py` Pipeline-health panel (T9):** `_pipeline_health()` surfaces the silent-degradation states
+  (unembedded-after-45min, sources at `consecutive_failures > 10`, audio not-ready/incomplete-day, governance
+  frozen-active, `digest_audio` MB + retention-stalled, and the `eval_runs` trend). New tables: **`eval_runs`**
+  (T10 scored eval, bot-only) and **`podcast_predictions`** (T14, bot-only) — neither is web-read, so no
+  `web_db_role.sql` grant.
 
 ### `web/` — Next.js 14 (baked into image)
 
@@ -428,7 +531,13 @@ Sidebar-free top-nav IA; header view switcher over routes, each a `.feed-left` l
 RightPanel. `.reader` is the fixed full-width shell.
 
 - `app/layout.js` — SSR root: no data fetch; renders `Header` + `<main class="reader">`. No sidebar, no global
-  prefetch (each route fetches its own).
+  prefetch (each route fetches its own). **PWA (T15):** declares `manifest: "/manifest.webmanifest"`
+  (`app/manifest.js`, standalone display + brand colors + `icon-192/512/maskable-512.png`), `appleWebApp`, and a
+  `viewport.themeColor`; mounts `<ServiceWorker />` (registers `public/sw.js`). The SW is installability + an
+  offline fallback ONLY: it NEVER intercepts `/api/*` (freshness + zero-egress) and NEVER caches app HTML (the
+  per-request nonce'd CSP would replay a stale nonce), so the offline fallback is the static, script-free
+  `public/offline.html`; only `/_next/static/*` + hashed assets are cache-first. Registrar runs from a nonce'd
+  bundle → no CSP change.
 - `app/page.js` (`/`→latest) / `app/d/[date]/page.js` — daily server component: parse digest, build project hints,
   fetch bullet analyses + TVL + market + bullet source times (`getBulletTimes`→`ts`) + the digest list
   (`listDigests`→`items` for `DateNav`) + that day's podcasts (`getPodcastsForDate`) + audio-briefing metadata
@@ -441,7 +550,11 @@ RightPanel. `.reader` is the fixed full-width shell.
   the clock to that variant's known duration, reapplies the rate, and resumes if it was playing (each variant
   carries its own `duration_sec` + `chapters`). **Chapters** (per variant, jsonb `[{title,start}]`; the `short`
   flash has none): tick marks on the track, the active chapter title shown in place of the label, and a toggle
-  (`☰`) opening a clickable jump list. `app/api/audio/[date]/route.js` = **Range-aware** stream of the
+  (`☰`) opening a clickable jump list. **Chapter deep links (T15):** each chapter row has a 🔗 copy button
+  (`audio.chapterDeepLink` → `/d/DATE?variant=V&t=SEC`); `AudioPlayer` reads `?variant=&t=` on mount
+  (`parseAudioDeepLink`) and `AudioProvider.requestSeek` seeks there (deep link wins over the saved position,
+  switching length first if named). `useMediaSession` lock-screen artwork is the per-date OG card
+  (`/api/og?date=`) + square icon fallbacks. `app/api/audio/[date]/route.js` = **Range-aware** stream of the
   `digest_audio.audio` bytea for `?variant=` (default `standard`; validated against the allowed set) — only
   'ready' served; works behind basic auth via same-origin cred replay.
 - `app/narratives/page.js` → `NarrativeView`; `app/weekly/page.js` → `WeeklyView` — the two board routes.
@@ -538,7 +651,8 @@ RightPanel. `.reader` is the fixed full-width shell.
   entities, brand-aggregated TVL), `getNarrativesWithSignals`, `getEntityGraph` (nodes now carry `tvlChange7d`/
   `tvlChange1d`/`mcapTvl`/`chains`/`tokenSymbol` for the panel Fundamentals block).
   `latestDate()` filters `error IS NULL AND content <> ''` so a failed run never hijacks `/`. Stop-lists
-  consolidated into one shared `TAG_STOPWORDS` (see Conventions). **Add a new query to the module that owns its
+  consolidated into one shared `TAG_STOPWORDS`, single-sourced in `lib/tagStopwords.js` since 2026-07-15 and
+  imported by both matcher layers (see Conventions). **Add a new query to the module that owns its
   table, not a monolith.** `lib/useHeaderSearch.js` — shared header-search hook.
 - `lib/llm.js` — multi-provider LLM client mirroring `app/llm.py` (`chatCreate`/`chatComplete`).
 - `lib/narratives.js` — pure presentation helpers (state/momentum/type/severity meta, `timeAgo`,

@@ -388,6 +388,157 @@ def cmd_dealias(dry_run: bool = False) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Purge zero-footprint collision-risk / generically-named junk entities
+# --------------------------------------------------------------------------- #
+
+def _entity_footprint(slug: str, name: str) -> list[str]:
+    """Evidence the entity has REAL coverage under this slug — non-empty means
+    'do not auto-delete, a human must look'. Mirrors the manual review procedure
+    from /audit-data (graph edges, intel brief, avatar, digest coverage)."""
+    fp: list[str] = []
+    with db._conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM entity_edges WHERE slug_a = %s OR slug_b = %s",
+                    (slug, slug))
+        n = cur.fetchone()[0]
+        if n:
+            fp.append(f"{n} graph edges")
+        cur.execute("SELECT 1 FROM entity_intel_brief WHERE lower(entity_name) = lower(%s) LIMIT 1",
+                    (name,))
+        if cur.fetchone():
+            fp.append("intel brief")
+        try:
+            cur.execute("SELECT 1 FROM entity_avatars WHERE slug = %s LIMIT 1", (slug,))
+            if cur.fetchone():
+                fp.append("cached avatar")
+        except Exception:
+            conn.rollback()
+        cur.execute("SELECT COALESCE(digest_mention_count, 0) FROM entity_memory WHERE slug = %s",
+                    (slug,))
+        row = cur.fetchone()
+        if row and row[0]:
+            fp.append(f"digest coverage ({row[0]})")
+    return fp
+
+
+def purge_collisions(dry_run: bool = False, quiet: bool = False) -> dict:
+    """Auto-resolve the audit's review-only entity classes with graduated actions.
+
+    Candidates = high-collision-risk entities (a bare name/alias is common prose —
+    'firm'/'would'/'zero') and generically-NAMED junk ('Gas'/'Bridge'). Per entity:
+
+    • colliding term is a NON-IDENTITY alias (piggyback like 'alpha' on AlphaFi Agg,
+      'elon' on Echelon Market) → STRIP the alias (never the entity), unless that
+      would orphan it. Deleting an entity over a mere alias is never right.
+    • colliding term IS the entity's own name/slug identity → DELETE + durably
+      BLOCK re-creation (entity_review verdict='block'), but ONLY when provably
+      junk: zero footprint (no entity_edges, intel brief, cached avatar, or digest
+      coverage), mc≤2, and NOT listed in defillama_protocols (a DeFiLlama slug is
+      a real product by construction — decayed mention_count doesn't make it junk).
+    • anything else → printed for human review; confirm real projects with
+      `entity_audit keep <slug>` so they stop being flagged forever.
+
+    Codifies the 2026-07-02 manual backlog review. A wrong block is reversible:
+    `entity_audit keep <slug>` flips the verdict and extraction re-creates the
+    entity on its next genuine mention.
+    """
+    from . import audit
+    P = (lambda *a: None) if quiet else print
+    P("\n=== Purging junk entities / stripping collision aliases ===\n")
+
+    hits = audit.check_collision_risk()
+    _junk, _generic, generic_name, _ct, _vc = audit.check_entity_hygiene()
+    dl_slugs = _defillama_slugs()
+
+    # slug → {term, ...} colliding terms (lowercased, deduped)
+    flagged: dict[str, dict[str, str]] = defaultdict(dict)
+    for slug, term, mc, feed_hits in hits:
+        flagged[slug][term.lower()] = f"'{term}' = common prose ({feed_hits} feed hits vs mc={mc})"
+    for slug, name, mc in generic_name:
+        flagged[slug][_norm(name)] = f"generically-named junk ('{name}', mc={mc}, no distinctive alias)"
+
+    deleted, stripped, review = 0, 0, []
+    for slug, terms in sorted(flagged.items()):
+        with db._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT name, COALESCE(mention_count,0), COALESCE(aliases,'{}') "
+                "FROM entity_memory WHERE slug = %s", (slug,))
+            row = cur.fetchone()
+        if not row:
+            continue
+        name, mc, aliases = row
+        why = "; ".join(terms.values())
+        identity = {_norm(name), _norm(slug), (name or "").lower().strip()}
+        identity_hit = any(t in identity for t in terms)
+
+        if identity_hit:
+            fp = _entity_footprint(slug, name)
+            if fp or mc > 2 or slug in dl_slugs:
+                if slug in dl_slugs:
+                    fp = fp + ["DeFiLlama-listed"]
+                review.append((slug, name, mc, fp, why))
+                continue
+            if dry_run:
+                P(f"  WOULD DELETE+BLOCK {slug!r} ({name}) — {why}")
+            else:
+                with db._conn() as conn, conn.cursor() as cur:
+                    cur.execute("DELETE FROM entity_memory WHERE slug = %s", (slug,))
+                db.set_entity_review(slug, "block", why[:500])
+                P(f"  DELETED+BLOCKED {slug!r} ({name}) — {why}")
+            deleted += 1
+            continue
+
+        # Non-identity piggyback alias(es): strip them, keep the entity.
+        to_strip = [a for a in aliases if (a or "").strip().lower() in terms]
+        if not to_strip:
+            review.append((slug, name, mc, [], why))
+            continue
+        remaining = [a for a in aliases if a not in to_strip]
+        keeps_identity = (" " in (name or "")) or any(
+            " " in a or entities.matchable_term(a) for a in remaining)
+        if not keeps_identity:
+            review.append((slug, name, mc, ["strip would orphan"], why))
+            continue
+        if dry_run:
+            P(f"  WOULD STRIP {to_strip} from {slug!r} ({name}) — {why}")
+        else:
+            with db._conn() as conn, conn.cursor() as cur:
+                for a in to_strip:
+                    cur.execute(
+                        "UPDATE entity_memory SET aliases = array_remove(aliases, %s), "
+                        "updated_at = now() WHERE slug = %s", (a, slug))
+            P(f"  STRIPPED {to_strip} from {slug!r} ({name}) — {why}")
+        stripped += len(to_strip)
+
+    if review:
+        P(f"\n  {len(review)} candidates need human review:")
+        for slug, name, mc, fp, why in review[:25]:
+            P(f"    ? {slug!r} ({name}, mc={mc}) footprint: {', '.join(fp) or 'mc>2'}")
+            P(f"        flagged: {why}")
+            P(f"        real project → python3 -m app.entity_audit keep {slug}")
+        if len(review) > 25:
+            P(f"    … +{len(review) - 25} more")
+
+    P(f"\n{'Would delete' if dry_run else 'Deleted'} {deleted} junk entities, "
+      f"{'would strip' if dry_run else 'stripped'} {stripped} piggyback aliases "
+      f"({len(review)} left for review).")
+    return {"deleted": deleted, "aliases_stripped": stripped,
+            "review": len(review), "dry_run": dry_run}
+
+
+def cmd_keep(slugs: list[str]) -> None:
+    """Record a human 'keep' verdict: the entity is real; stop flagging it."""
+    for slug in slugs:
+        with db._conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT name FROM entity_memory WHERE slug = %s", (slug,))
+            row = cur.fetchone()
+        if not row:
+            print(f"  SKIP {slug!r} — not in entity_memory")
+            continue
+        db.set_entity_review(slug, "keep", "human-confirmed real project")
+        print(f"  KEEP {slug!r} ({row[0]}) — recorded; audit will stop flagging it")
+
+
+# --------------------------------------------------------------------------- #
 # Backfill twitter_handle from co-occurring feed mentions
 # --------------------------------------------------------------------------- #
 
@@ -706,20 +857,29 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description="Entity memory audit and maintenance")
     ap.add_argument("command", choices=[
-        "stats", "merge", "dealias", "backfill-handles", "reextract",
-        "seed-from-feeds", "seed-from-coingecko", "backfill-avatars", "all",
+        "stats", "merge", "dealias", "purge-collisions", "keep", "backfill-handles",
+        "reextract", "seed-from-feeds", "seed-from-coingecko", "backfill-avatars", "all",
     ])
+    ap.add_argument("slugs", nargs="*", help="Entity slugs (for the `keep` command)")
     ap.add_argument("--dry-run", action="store_true", help="Print what would be done without writing")
     ap.add_argument("--days", type=int, default=7, help="Days of history for reextract (default: 7)")
     args = ap.parse_args()
 
     cmd = args.command
+    if cmd == "keep":
+        if not args.slugs:
+            ap.error("keep requires at least one slug")
+        cmd_keep(args.slugs)
+        print("\nDone.")
+        return
     if cmd in ("stats", "all"):
         cmd_stats()
     if cmd in ("merge", "all"):
         cmd_merge(dry_run=args.dry_run)
     if cmd in ("dealias", "all"):
         cmd_dealias(dry_run=args.dry_run)
+    if cmd in ("purge-collisions", "all"):
+        purge_collisions(dry_run=args.dry_run)
     if cmd in ("backfill-handles", "all"):
         cmd_backfill_handles(dry_run=args.dry_run)
     if cmd in ("seed-from-feeds", "all"):

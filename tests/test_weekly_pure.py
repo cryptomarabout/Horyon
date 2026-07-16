@@ -122,3 +122,89 @@ def test_validate_weekly_trending_without_bullet_is_medium():
     errs = validate_weekly_output(html)
     assert any("Trending Dapps" in e and e.startswith("MEDIUM") for e in errs)
     assert not any(e.startswith("HIGH") for e in errs)
+
+
+# ── Weekly v2 (T12): deterministic movers + rotation + section validation ────
+from app.weekly import (  # noqa: E402
+    build_movers_block,
+    compute_rotation,
+    validate_weekly_section,
+    _deslop,
+)
+from app import prompts  # noqa: E402
+
+
+def _mk_market(rows):
+    """rows: [(symbol, rank, change_7d)] → ctx with a market.top50 shape."""
+    return {"market": {"top50": [
+        {"symbol": s, "rank": r, "change_7d": c} for s, r, c in rows]}}
+
+
+def test_movers_block_is_exactly_5_plus_5():
+    rows = [(f"C{i}", i, float(20 - i)) for i in range(1, 13)]  # 12 coins, +19..+8
+    block = build_movers_block(_mk_market(rows))
+    g = block.split("Gainers:</b>")[1].split("\n")[0]
+    los = block.split("Losers:</b>")[1]
+    # parse ticker+pct tokens the way the web parser does
+    import re
+    gain_toks = re.findall(r"\bC\d+\s[+\-]\d", g)
+    lose_toks = re.findall(r"\bC\d+\s[+\-]\d", los)
+    assert len(gain_toks) == 5
+    assert len(lose_toks) == 5
+    # gainers are the 5 highest, losers the 5 lowest
+    assert "C1 +19.0%" in g       # best
+    assert "C12 +8.0%" in los     # worst
+
+
+def test_movers_block_none_on_no_price_data():
+    assert build_movers_block({"market": {"top50": []}}) is None
+    assert build_movers_block({}) is None
+
+
+def test_compute_rotation_btc_led():
+    ctx = _mk_market([("BTC", 1, 6.0), ("ETH", 2, 1.0)] +
+                     [(f"A{i}", 10 + i, -2.0) for i in range(1, 6)])
+    assert compute_rotation(ctx) == "BTC"
+
+
+def test_compute_rotation_alt_led():
+    ctx = _mk_market([("BTC", 1, 1.0), ("ETH", 2, 2.0)] +
+                     [(f"A{i}", 10 + i, 9.0) for i in range(1, 6)])
+    assert compute_rotation(ctx) == "ALT"
+
+
+def test_compute_rotation_mixed_when_close():
+    ctx = _mk_market([("BTC", 1, 3.0), ("ETH", 2, 2.8)] +
+                     [(f"A{i}", 10 + i, 2.9) for i in range(1, 6)])
+    assert compute_rotation(ctx) == "MIXED"
+
+
+def test_compute_rotation_mixed_on_missing_data():
+    assert compute_rotation({"market": {"top50": []}}) == "MIXED"
+    # BTC present, no alts → MIXED
+    assert compute_rotation(_mk_market([("BTC", 1, 5.0), ("ETH", 2, 1.0)])) == "MIXED"
+
+
+def test_validate_section_flags_empty_and_dash_and_missing_bullets():
+    assert any(e.startswith("HIGH") for e in validate_weekly_section("defi", ""))
+    # defi requires bullets
+    assert any("no bullets" in e for e in validate_weekly_section("defi", "just prose"))
+    # em dash flagged
+    assert any("dash" in e for e in validate_weekly_section("watch", "watch this — closely"))
+    # a clean bulleted defi section passes
+    assert validate_weekly_section("defi", "• Base TVL +12%, capital rotating in") == []
+    # backfill sentinel is allowed without bullets
+    assert validate_weekly_section(
+        "defi", "Data unavailable for historical backfill") == []
+
+
+def test_deslop_strips_em_dashes_keeps_numeric_range():
+    assert "—" not in _deslop("bought at market — no discount")
+    assert _deslop("range 3—5 today") == "range 3-5 today"
+
+
+def test_section_prompts_exist_for_every_prose_section():
+    for key in ("market", "defi", "trending", "stories", "watch"):
+        sys = prompts.build_weekly_section_system(key)
+        assert "em dash" in sys.lower()          # shared rails present
+        assert prompts.WEEKLY_SECTIONS[key]["header"].startswith("<b>")

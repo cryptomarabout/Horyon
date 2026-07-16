@@ -6,15 +6,22 @@ they added cost + free-tier rate-limit risk for little signal over the Python si
 Pipeline (per bullet):
   1. Python signals (deterministic, summed then capped at 100):
        s1 corroboration: SUM of source CREDIBILITY weights, not a raw count  (0–25)
-       s2 financial magnitude                                                (0–20)
-       s3 appearance velocity                                                (0–15)
+          (log-spaced bands calibrated to the measured 0–90 credibility-sum
+           distribution — a single premium Kaiko item (3.0) still tops the band;
+           three unknown Tier-2 accounts cross-posting caps at 13, not max)
+       s2 financial magnitude — scans the bullet's OWN text only             (0–20)
+       s3 appearance velocity — earliest item per DISTINCT source            (0–15)
        s4 entity weight (TVL or 30d mention count)                           (0–20)
        s5 semantic criticality (keyword buckets)                             (0–15)
-       s6 novelty vs last 7 days of digests (semantic, Jaccard)              (0– 5)
+       s6 novelty vs last 7 days of digests (graded 0/2/5, Jaccard echoes)   (0– 5)
        s7 saturation PENALTY: protocol already dominates recent coverage     (0–-12)
           (bypassed for hacks/≥$500M events so real news is never buried)
   2. Credibility penalty: ×0.5 when ONLY Tier-3 (clickbait) sources reported it.
   3. Temporal decay (story age at digest time).
+
+Corroboration/velocity read a 48h feed window ending at the digest date — a story
+that broke the previous morning still earns s1/s3 (the old 24h cliff zeroed both
+for ~12% of bullets); decay discounts the age instead of erasing the credit.
 
 Source credibility (``FEED_CREDIBILITY``): Tier 1 trusted = 1.2, Tier 2 default = 1.0,
 Tier 3 clickbait = 0.4. Keyed by domain or Twitter handle (``get_source_key``).
@@ -38,6 +45,7 @@ from datetime import date as date_t, datetime, time, timezone
 from urllib.parse import urlparse
 
 from . import db
+from .entities import matchable_term
 
 log = logging.getLogger(__name__)
 
@@ -51,15 +59,22 @@ _MULT = {
 
 # ── Signal 5: semantic criticality keyword buckets (max bucket, not sum) ────
 _KEYWORDS = {
-    15: ["hack", "exploit", "drain", "blacklist", "freeze", "rug", "breach", "attack"],
+    # "phishing"/"stolen"/"theft"/"seized" added 2026-07-01: theft events phrased without
+    # "hack"/"exploit" ("Polymarket phishing loss") were scoring s5=0.
+    15: ["hack", "exploit", "drain", "blacklist", "freeze", "rug", "breach", "attack",
+         "phishing", "stolen", "theft", "seized"],
     # Funding & M&A rank alongside governance — capital flows are high-signal events the
     # feed should surface. ("series a"/"series b" are kept as phrases to avoid matching a
     # bare "series".) Paired with the digest-prompt FUNDING & M&A include rule.
+    # "shuts"/"buys"/"ipo" etc. added 2026-07-01: half the corpus scored s5=0 while being
+    # plainly typed events ("Sophon shuts L2", "SBI buys Bitbank") the list just missed.
     11: ["vulnerability", "emergency", "pause", "governance", "vote", "proposal", "shutdown",
+         "shuts", "shut down", "winds down", "wind down",
          "raise", "raises", "raised", "funding", "fundraise", "seed round",
          "series a", "series b", "acquire", "acquires", "acquired", "acquisition",
-         "merger", "buyout"],
-    7:  ["mainnet", "upgrade", "v2", "v3", "launch", "audit", "migration", "deploy"],
+         "merger", "buyout", "buys", "buyback", "ipo"],
+    7:  ["mainnet", "upgrade", "v2", "v3", "launch", "audit", "migration", "deploy",
+         "debut", "listing", "lists", "testnet"],
     3:  ["partnership", "integration", "update", "support", "adds", "enables"],
 }
 _KEYWORD_PATTERNS = {
@@ -124,6 +139,52 @@ def is_semantic_duplicate(words1: set[str], words2: set[str]) -> bool:
     return False
 
 
+def _is_near_duplicate(words1: set[str], words2: set[str]) -> bool:
+    """Looser duplicate test used ONLY by the novelty signal (s6).
+
+    Bullets reaching scoring already passed the digest's pre-filter, which drops
+    candidates via the strict ``is_semantic_duplicate`` above (app/digest.py) —
+    so by construction that test can never fire here and s6 was a constant +5
+    for 60 straight days. This variant (Jaccard ≥0.45, or ≥2 shared words
+    covering ≥⅔ of the shorter set) catches the near-repeats that slip the
+    gate. Do NOT use it for hard dedup decisions — it over-matches on purpose.
+    """
+    if not words1 or not words2:
+        return False
+    chains1 = words1 & _CHAIN_WORDS
+    chains2 = words2 & _CHAIN_WORDS
+    if chains1 and chains2 and chains1 != chains2:
+        return False
+    intersection = words1 & words2
+    union = words1 | words2
+    if union and len(intersection) / len(union) >= 0.45:
+        return True
+    shorter_len = min(len(words1), len(words2))
+    return len(intersection) >= 2 and len(intersection) / shorter_len >= 2 / 3
+
+
+def _is_soft_echo(words1: set[str], words2: set[str]) -> bool:
+    """Weakest overlap test — a partial thematic repeat that is NOT a near-duplicate.
+
+    Used ONLY by the graded novelty signal (s6) to distinguish a fully-fresh story
+    from one that softly echoes recent coverage (same protocol, adjacent angle).
+    Called after ``_is_near_duplicate`` has already returned False, so it fires on the
+    gap below that gate: Jaccard in [0.30, 0.45), or ≥2 shared significant words that
+    don't cover ⅔ of the shorter set. Chain-disjoint titles are never echoes.
+    """
+    if not words1 or not words2:
+        return False
+    chains1 = words1 & _CHAIN_WORDS
+    chains2 = words2 & _CHAIN_WORDS
+    if chains1 and chains2 and chains1 != chains2:
+        return False
+    intersection = words1 & words2
+    union = words1 | words2
+    if union and len(intersection) / len(union) >= 0.30:
+        return True
+    return len(intersection) >= 2
+
+
 def _norm_title(t: str) -> str:
     """Fallback legacy title normalizer."""
     t = _EMOJI_RE.sub(" ", t.lower())
@@ -177,10 +238,20 @@ FEED_CREDIBILITY = {
     "coindesk.com": 1.2,
     "bankless.com": 1.2,
     "insights.glassnode.com": 1.2,
+    # The Glassnode blog moved hosts (2026-07-07, see feeds.py) — keep BOTH keys so historical
+    # items keep corroborating and new ones are weighted Tier-1.
+    "research.glassnode.com": 1.2,
+    # The Tier-1 news outlets ALSO publish via Twitter — get_source_key maps those items
+    # to @handles, not domains, so both keys are needed or ~80% of their volume (e.g.
+    # @theblockco, the single biggest source in the corpus) is silently weighted Tier-2.
+    "@theblockco": 1.2,
+    "@coindesk": 1.2,
+    "@decryptmedia": 1.2,
+    "@blockworks": 1.2,
     # Kaiko: premium institutional research (exclusive data/analysis, no RSS — scraped directly).
     # Weight 3.0 means a single Kaiko article alone reaches the ≥3.0 corroboration threshold → s1=25 (max).
+    # (No "www." variant: get_source_key strips the prefix before lookup.)
     "kaiko.com": 3.0,
-    "www.kaiko.com": 3.0,
     "@kaikodata": 3.0,  # Kaiko's Twitter — same institutional source
 
     # Low Trust / Clickbait (Tier 3) - weight 0.4
@@ -216,10 +287,14 @@ class _RefData:
         # entity name/alias → mention_count, plus the searchable term list
         self.entity_terms: list[tuple[str, int]] = []   # (term_lower, mention_count)
         try:
-            for name, aliases, mentions in db.get_entity_mention_map():
+            for name, aliases, type_, mentions in db.get_entity_mention_map():
                 terms = [name] + list(aliases or [])
                 for term in terms:
-                    if term and len(term) >= 3:
+                    # matchable_term (entities.py) is the ONE shared false-positive
+                    # gate. Without it, junk single-word aliases ("Onchain", "Public",
+                    # "Notional") OR-match half the corpus and hand bullets a maxed
+                    # corroboration/velocity signal built on noise.
+                    if term and len(term) >= 3 and matchable_term(term, type_, mentions or 0):
                         self.entity_terms.append((term, mentions or 0))
         except Exception:
             log.debug("scoring: could not load entity mention map", exc_info=True)
@@ -328,16 +403,41 @@ def _bullet_entities(text: str, ref: _RefData) -> list[tuple[str, int]]:
 
 
 def _signal_corroboration(credibilities: list[float]) -> int:
-    """Compute corroboration score based on the sum of credibility weights."""
-    total_credibility = sum(credibilities)
-    if total_credibility >= 3.0:
+    """Corroboration score (0–25) from the SUM of source credibility weights.
+
+    Log-spaced bands (2026-07-11 recalibration, T1): the old bands topped out at a
+    total of ≥3–4, but a 30-day replay showed digest bullets are heavily corroborated
+    — the credibility sum ranges 0…90 (median ~8) — so 83% of bullets hit the 25 band
+    and s1 stopped separating stories (every daily top-5 bullet scored 25). The bands
+    below roughly DOUBLE each step, matching that measured distribution so the signal
+    spreads across the full 0–25 range and does ranking work again.
+
+    Two documented properties are preserved:
+      - a single Kaiko article (weight 3.0) still reaches the top band alone — the
+        premium-tier override (``max_credibility >= 3.0``);
+      - three unknown Tier-2 accounts cross-posting (total 3.0, no trusted/premium
+        source) caps at 13, nowhere near max — the cheapest republication attack.
+    """
+    total = sum(credibilities)
+    # Premium single-source override: Kaiko (3.0) alone tops the band. No non-premium
+    # combination of Tier-1/2 sources can reach 3.0 in a single source, so this only
+    # fires for the premium tier.
+    if max(credibilities, default=0.0) >= 3.0:
         return 25
-    if total_credibility >= 2.0:
-        return 20
-    if total_credibility >= 1.0:
-        return 12
-    if total_credibility >= 0.4:
+    if total >= 24:
+        return 25
+    if total >= 12:
+        return 21
+    if total >= 6:
+        return 17
+    if total >= 3:
+        return 13
+    if total >= 1.5:
+        return 9
+    if total >= 0.8:
         return 5
+    if total >= 0.4:
+        return 2
     return 0
 
 
@@ -427,13 +527,25 @@ def _signal_criticality(text: str) -> int:
 
 
 def _signal_novelty(title: str, ref: _RefData) -> int:
+    """Graded novelty vs the last 7 days of digest titles (0/2/5).
+
+    5 = genuinely fresh · 2 = soft echo of recent coverage (same subject, new angle)
+    · 0 = near-duplicate. The binary 5/0 version was effectively a constant +5 (it fired
+    0 → 195/213 bullets scored 5 over the replay window) because the strict near-dup gate
+    almost never matched a *title* against prior titles. The middle tier gives s6 real
+    variance so a follow-up story ("Aave V4 hits $250M" after "Aave V4 launches") ranks
+    below a brand-new one.
+    """
     words = get_title_words(title)
     if not words:
         return 5
+    soft = False
     for cw in ref.covered_word_sets:
-        if is_semantic_duplicate(words, cw):
+        if _is_near_duplicate(words, cw):
             return 0
-    return 5
+        if not soft and _is_soft_echo(words, cw):
+            soft = True
+    return 2 if soft else 5
 
 
 # ── Decay ────────────────────────────────────────────────────────────────────
@@ -482,13 +594,22 @@ def compute_importance_scores(bullets: list[dict], digest_date: str) -> list[dic
             entities = _bullet_entities(text, ref)
             terms = [t for t, _ in entities] or _significant_words(text)
 
-            feed = db.get_feed_items_matching_terms(terms, day, window_hours=24) if terms else []
+            # 48h window (was 24h): the old cliff zeroed s1/s3 for stories that broke
+            # the previous morning (~12% of bullets); decay discounts age instead.
+            feed = db.get_feed_items_matching_terms(terms, day, window_hours=48) if terms else []
+            if not entities and len(terms) >= 2:
+                # Entity-less bullets fall back to generic significant words, and the DB
+                # match is an OR — "volume" or "governance" alone matches half the corpus
+                # and would max s1/s3 on pure noise. Require ≥2 distinct fallback terms
+                # per item so only genuinely related coverage corroborates.
+                pats = [re.compile(r"\b" + re.escape(t) + r"\b", re.IGNORECASE) for t in terms]
+                feed = [r for r in feed
+                        if sum(1 for p in pats if p.search(r.get("content") or "")) >= 2]
 
-            # Exclude thin_content items from the corroboration and velocity signals.
-            # A 50-char teaser blurb (e.g. Blockworks newsletters) is not strong evidence
-            # that a story is real — it just means the site mentioned a keyword. Boilerplate
-            # and handle-title items are kept for velocity (they still prove publication
-            # timing) but excluded from amount-text to avoid inflating financial_magnitude.
+            # Exclude thin_content items from the corroboration signal. A 50-char teaser
+            # blurb (e.g. Blockworks newsletters) is not strong evidence that a story is
+            # real — it just means the site mentioned a keyword. Thin items still count
+            # for velocity (publication timing is valid evidence either way).
             substantive_feed = [r for r in feed
                                  if r.get("quality_flag", "ok") != "thin_content"]
 
@@ -496,22 +617,22 @@ def compute_importance_scores(bullets: list[dict], digest_date: str) -> list[dic
             source_keys.discard("")
             credibilities = [get_source_credibility(sk) for sk in source_keys]
 
-            domains = {
-                urlparse(r["link"]).netloc.lower().removeprefix("www.")
-                for r in substantive_feed if r.get("link")
-            }
-            domains.discard("")
-
-            # Velocity uses all matching items (thin or not) — the timestamp is valid.
+            # Velocity counts distinct-SOURCE pickup — the earliest item per source key
+            # (thin or not). One account re-posting a story five times is not velocity.
+            first_ts_by_source: dict[str, datetime] = {}
+            for r in feed:
+                ts = r.get("ts")
+                sk = get_source_key(r.get("link") or "")
+                if ts and sk and (sk not in first_ts_by_source or ts < first_ts_by_source[sk]):
+                    first_ts_by_source[sk] = ts
             timestamps = [r["ts"] for r in feed if r.get("ts")]
-            # Amount scan restricted to substantive items only (not thin teasers/bios).
-            amount_text = text + " " + " ".join(
-                (r.get("content") or "")[:300] for r in substantive_feed[:10]
-            )
 
             s1 = _signal_corroboration(credibilities)
-            s2 = _signal_amount(amount_text)
-            s3 = _signal_velocity(timestamps)
+            # Financial magnitude reads the bullet's OWN text only. Scanning corroborating
+            # items imported ambient figures (an adjacent "$1B volume milestone" tweet)
+            # into unrelated bullets — half the corpus maxed s2 that way.
+            s2 = _signal_amount(text)
+            s3 = _signal_velocity(list(first_ts_by_source.values()))
             s4 = _signal_entity_weight(entities, ref)
             s5 = _signal_criticality(text)
             s6 = _signal_novelty(title, ref)
@@ -534,7 +655,10 @@ def compute_importance_scores(bullets: list[dict], digest_date: str) -> list[dic
 
             b["_entities"] = entities
             b["_python_total"] = p_total
-            b["_source_count"] = len(domains)
+            # Distinct substantive SOURCES (same base as s1) — the old distinct-domain
+            # count collapsed every Twitter source into one "nitter.net" domain, so the
+            # UI badge showed "1 source" beside a maxed corroboration signal.
+            b["_source_count"] = len(source_keys)
             b["_first_seen_at"] = min(timestamps) if timestamps else ref_time
             b["_breakdown_partial"] = {
                 "s1": s1, "s2": s2, "s3": s3, "s4": s4, "s5": s5, "s6": s6,

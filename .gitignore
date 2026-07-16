@@ -37,3 +37,7 @@ backups/
 
 # Claude Code machine-local settings (may contain ad-hoc creds in allow-rules)
 .claude/settings.local.json
+
+# Point-in-time audit/roadmap working docs (kept local by request, 2026-07-07)
+docs/ROADMAP.md
+docs/ROADMAP-LONGTERM.md

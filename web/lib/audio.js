@@ -19,6 +19,28 @@ export const RATES = [1, 1.25, 1.5, 2];
 // Server variant keys → human labels for the length switcher.
 export const VARIANT_LABELS = { short: "Flash", standard: "Briefing", explainer: "Deep Dive" };
 
+// Shareable permalink to a specific chapter of a day's briefing:
+//   /d/2026-07-15?variant=explainer&t=312
+// AudioPlayer reads ?variant=/?t= on mount and seeks there (parseAudioDeepLink).
+export function chapterDeepLink(date, variant, start) {
+  const t = Math.max(0, Math.floor(Number(start) || 0));
+  const v = VARIANT_LABELS[variant] ? variant : "standard";
+  return `/d/${date}?variant=${encodeURIComponent(v)}&t=${t}`;
+}
+
+// Parse a player deep link from a URLSearchParams-like object (has .get). Returns
+// { variant, t } with variant validated against the known set and t a non-negative
+// integer, or null for each when absent/invalid — so a hand-edited ?t=abc is ignored.
+export function parseAudioDeepLink(params) {
+  if (!params || typeof params.get !== "function") return { variant: null, t: null };
+  const vRaw = params.get("variant");
+  const variant = vRaw && VARIANT_LABELS[vRaw] ? vRaw : null;
+  const tRaw = params.get("t");
+  const tNum = tRaw == null ? NaN : Number(tRaw);
+  const t = Number.isFinite(tNum) && tNum >= 0 ? Math.floor(tNum) : null;
+  return { variant, t };
+}
+
 // Index of the chapter that contains time `t` (chapters are sorted ascending by start).
 export function chapterAt(chapters, t) {
   let idx = -1;

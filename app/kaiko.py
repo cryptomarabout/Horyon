@@ -35,7 +35,7 @@ import time
 from html import unescape
 from urllib.parse import urlparse
 
-from . import config, db, entities, http, ingest
+from . import config, db, entities, http, ingest, util
 
 log = logging.getLogger(__name__)
 
@@ -74,7 +74,6 @@ _LDJSON_RE = re.compile(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</sc
 _OG_RE = re.compile(r'<meta[^>]+property="og:(title|description)"[^>]+content="([^"]*)"', re.I)
 _TITLE_SUFFIX_RE = re.compile(r"\s*[-|–—]\s*Kaiko\s*$", re.I)
 _ARTICLE_TYPES = {"WebPage", "Article", "BlogPosting", "NewsArticle", "Report"}
-_TAG_RE = re.compile(r"<[^>]+>")
 _PARA_RE = re.compile(r"<p(?:\s[^>]*)?>(.+?)</p>", re.S | re.I)
 
 
@@ -182,7 +181,7 @@ def _extract_body(html: str, max_chars: int = 1200) -> str:
     chunks: list[str] = []
     total = 0
     for m in _PARA_RE.finditer(scope):
-        text = _unescape(_TAG_RE.sub("", m.group(1))).strip()
+        text = _unescape(util.TAG_RE.sub("", m.group(1))).strip()
         # Skip short fragments (nav, CTA) and bare article-title echoes (no verb, <70 chars)
         if len(text) < 60 or text.lower().startswith(("share", "follow", "subscribe", "©", "cookie")):
             continue
@@ -236,7 +235,7 @@ def build_item(url: str, html: str) -> dict | None:
         if body_snippet:
             parts.append(body_snippet)
     content = " ".join(parts).strip()
-    if len(ingest._plain(content)) < ingest.MIN_TEXT_LEN:
+    if len(util.plain_text(content)) < ingest.MIN_TEXT_LEN:
         log.debug("kaiko: thin content for %s", url)
         return None
 

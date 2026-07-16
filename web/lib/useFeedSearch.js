@@ -13,6 +13,8 @@ export default function useFeedSearch({ onSearchOpen, onSearchClear }) {
   const [searchSrcs,   setSearchSrcs]   = useState(0);
   const [searchSynth,      setSearchSynth]      = useState("");
   const [searchSynthState, setSearchSynthState] = useState("none");
+  const [searchAsOf, setSearchAsOf] = useState(null);
+  const [searchFacts, setSearchFacts] = useState(null);
 
   const handleSearch = useCallback(async (kw, opts = {}) => {
     setSearchQuery(kw);
@@ -21,6 +23,8 @@ export default function useFeedSearch({ onSearchOpen, onSearchClear }) {
     setSearchSrcs(0);
     setSearchSynth("");
     setSearchSynthState("none");
+    setSearchAsOf(null);
+    setSearchFacts(null);
     onSearchOpen();
     document.dispatchEvent(new CustomEvent("horyon:search-loading"));
 
@@ -52,6 +56,8 @@ export default function useFeedSearch({ onSearchOpen, onSearchClear }) {
         const synth = (r2.ok && d2.content) ? d2.content : "";
         setSearchSynth(synth);
         setSearchSynthState(synth ? "done" : "none");
+        setSearchAsOf(d2.cached ? (d2.asOf ?? null) : null);
+        setSearchFacts(d2.cached ? (d2.facts ?? null) : null);
       } catch {
         setSearchSynthState("none");
       }
@@ -71,6 +77,8 @@ export default function useFeedSearch({ onSearchOpen, onSearchClear }) {
       } else {
         setSearchResult(data.content || "No results.");
         setSearchSrcs(data.sources ?? 0);
+        setSearchAsOf(data.cached ? (data.asOf ?? null) : null);
+        setSearchFacts(data.cached ? (data.facts ?? null) : null);
         setSearchState("done");
       }
     } catch {
@@ -88,6 +96,8 @@ export default function useFeedSearch({ onSearchOpen, onSearchClear }) {
     setSearchSrcs(0);
     setSearchSynth("");
     setSearchSynthState("none");
+    setSearchAsOf(null);
+    setSearchFacts(null);
     document.dispatchEvent(new CustomEvent("horyon:clear-input"));
     onSearchClear();
   }, [onSearchClear]);
@@ -106,7 +116,8 @@ export default function useFeedSearch({ onSearchOpen, onSearchClear }) {
 
   const searchProp = searchQuery
     ? { keyword: searchQuery, state: searchState, result: searchResult, sources: searchSrcs,
-        synth: searchSynth, synthState: searchSynthState, onClose: handleClearSearch }
+        synth: searchSynth, synthState: searchSynthState, asOf: searchAsOf, facts: searchFacts,
+        onClose: handleClearSearch }
     : null;
 
   return { searchQuery, searchProp, handleSearch, handleClearSearch };

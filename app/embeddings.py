@@ -7,7 +7,7 @@ import re
 
 from ollama import Client
 
-from . import config
+from . import config, util
 
 log = logging.getLogger(__name__)
 
@@ -16,9 +16,7 @@ _client = Client(host=config.OLLAMA_HOST)
 # Bump when the cleaning logic changes so existing rows get re-embedded.
 EMBED_VERSION = 1
 
-_TAG_RE = re.compile(r"<[^>]+>")
 _URL_RE = re.compile(r"https?://\S+|\b[\w.-]+\.(?:com|net|org|io|xyz|co|eth|app)/\S*", re.I)
-_WS_RE = re.compile(r"\s+")
 
 # nomic-embed-text has a 2048-token context. A long article/transcript chunk overflows it
 # and Ollama returns 500 "input length exceeds the context length" (instead of truncating),
@@ -43,8 +41,8 @@ def clean_for_embedding(text: str) -> str:
     Falls back to the tag-stripped text if URL removal would empty it, so a
     URL-only item still produces something embeddable.
     """
-    stripped = _WS_RE.sub(" ", html.unescape(_TAG_RE.sub(" ", text or ""))).strip()
-    no_urls = _WS_RE.sub(" ", _URL_RE.sub(" ", stripped)).strip()
+    stripped = util.WS_RE.sub(" ", html.unescape(util.TAG_RE.sub(" ", text or ""))).strip()
+    no_urls = util.WS_RE.sub(" ", _URL_RE.sub(" ", stripped)).strip()
     return no_urls or stripped
 
 

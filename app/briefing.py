@@ -28,15 +28,59 @@ from __future__ import annotations
 import argparse
 import logging
 import re
-from datetime import date as date_t, datetime, timezone
+import time
+from datetime import date as date_t, datetime, timedelta, timezone
 
-from . import config, db, llm, prompts, tts
+from . import config, db, llm, prompts, tts, util
 
 log = logging.getLogger(__name__)
 
-# Reasoning-model leak guard (same failure mode handled in threads/podcasts/entity_brief).
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-_THINK_OPEN_RE = re.compile(r"<think>.*\Z", re.DOTALL | re.IGNORECASE)
+# Reasoning-leak guard, take 2 (2026-07-03 incident): the <think>-tag strip (llm.strip_think,
+# shared with threads/podcasts/entity_brief/digest) only catches a
+# leak the model wraps in its own delimiter. A reasoning model can instead narrate its planning
+# INLINE under the same 'HOST:'/'EXPERT:' labels real dialogue uses — e.g. "HOST: We need to
+# produce a script with at least 1035 words... Must include cold open..." — which is syntactically
+# identical to a real turn, so `_SPEAKER_RE`-based parsing alone can't tell them apart; it has to be
+# caught by CONTENT. Mirrors the phrase-echo detector in podcasts.py/entity_brief.py (`_META_RE`),
+# tuned to THIS prompt's own vocabulary (see prompts.py `_BRIEFING_*` blocks) — a real host/expert
+# line about crypto news never says these. Bare verbs like "must keep"/"must avoid"/"we need to
+# ensure" were tried and DROPPED — they collide with genuine analyst hedging ("we must keep an eye
+# on regulatory risk"), caught by this module's own test suite. Every phrase below is anchored to
+# the specific OBJECT the leak used (the show's own word-count/structure/format), not a bare verb,
+# which is what keeps collision risk with real commentary near zero. Validated against all 162
+# historical stored scripts (4,986 turns): 0 false positives, catches all 10 contaminated turns.
+_META_RE = re.compile(
+    r"\bwe need to (?:produce|write|design|create|reach|hit|expand|cover)\b|"
+    r"\bmust not invent\b|\bmust keep (?:the same|all)\b|\bmust alternate\b|"
+    r"\bmust vary host\b|\bmust avoid (?:hype|filler)\b|\bmust define jargon\b|"
+    r"\bmust not repeat (?:a name|names)\b|"
+    r"\bat least \d+ words\b|\b\d+[\-–]\d+\s*words\b|\bword count\b|"
+    r"\bchapter marker\b|\bmarker line\b|\bcold open\b|"
+    r"\bwe can mention\b|"
+    r"\bhost follow-?up questions?\b|\bthe signals? (?:below|given)\b|\bpattern:\s*host\b",
+    re.IGNORECASE,
+)
+# A turn that is NOTHING BUT a stage direction / rehearsal placeholder ('...', '(lead story)') —
+# the model rehearsing the turn structure instead of writing it. `_BRIEFING_EAR_RULES` already bans
+# parentheticals as spoken content, so a turn that is only one is never legitimate output either way.
+_PLACEHOLDER_RE = re.compile(r"^\.{2,}\s*(?:\([^)]{0,80}\))?$|^\([^)]{1,80}\)$")
+# A leaked "note to self" tacked onto the END of an otherwise-real turn (e.g. "...flowing next. Now
+# marker." / "...depth of the order book. Now move to next story.") — the model reminding itself
+# when to insert a chapter marker or transition. Anchored at end-of-turn + a short fixed set of
+# alternatives to keep collision risk with genuine dialogue near zero (a host would never end a
+# turn on the word "marker").
+_STAGE_NOTE_SUFFIX_RE = re.compile(
+    r"\s*\bNow\s+(?:marker|next story|move to next story|move on|the next story)\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_leak_turn(text: str) -> bool:
+    """A parsed turn that is leaked planning prose or a rehearsal placeholder, not real dialogue —
+    see the `_META_RE`/`_PLACEHOLDER_RE` incident note above."""
+    t = (text or "").strip()
+    return bool(_PLACEHOLDER_RE.match(t) or _META_RE.search(t))
+
 
 # "Say it aloud" sanitizers — a safety net under the prompt rules. TTS reads markdown, URLs,
 # emoji and stray symbols literally, so strip anything the model leaves behind.
@@ -211,15 +255,11 @@ def _say_misc(text: str) -> str:
     return _XYZ_RE.sub("X Y Z", text)
 
 
-def _strip_think(text: str) -> str:
-    text = _THINK_RE.sub("", text or "")
-    return _THINK_OPEN_RE.sub("", text).strip()
-
-
 def _normalize_for_speech(text: str) -> str:
     """Strip everything a TTS voice would mispronounce (markdown, URLs, emoji, dashes, list
     markers). The LLM does the ticker/number expansion; this only cleans up what slips through."""
     text = _MD_LINK_RE.sub(r"\1", text or "")
+    text = _STAGE_NOTE_SUFFIX_RE.sub("", text)  # leaked "Now marker."-style note tacked on the end
     text = _URL_RE.sub("", text)
     text = (text or "").translate(_UNICODE_HYPHENS)  # NB-hyphens → '-' before the dash→comma rule
     text = re.sub(r"[*_`#>]+", "", text)        # markdown emphasis / headers / quotes / code ticks
@@ -273,13 +313,20 @@ def _parse_turns(script: str) -> tuple[list[tuple[str, str, int]], list[str]]:
 
 def _speaker_turns(raw_script: str) -> tuple[list[tuple[str, str, int]], list[str]]:
     """Parse + speech-normalize each turn. Returns ``([(speaker, spoken_text, chapter_idx)],
-    chapter_titles)``, dropping empties."""
+    chapter_titles)``, dropping empties and reasoning-leak/placeholder turns (`_is_leak_turn`)."""
     parsed, titles = _parse_turns(raw_script)
     out = []
+    leaked = 0
     for sp, txt, ch in parsed:
+        if _is_leak_turn(txt):
+            leaked += 1
+            continue
         spoken = _normalize_for_speech(txt)
         if spoken:
             out.append((sp, spoken, ch))
+    if leaked:
+        log.warning("briefing: dropped %d reasoning-leak/placeholder turn(s), %d turn(s) kept",
+                    leaked, len(out))
     return out, titles
 
 
@@ -462,6 +509,39 @@ def _labeled_transcript(turns: list[tuple[str, str, int]], titles: list[str]) ->
     return "\n".join(out)
 
 
+# Fresh-draft retries granted to EVERY variant when a draft yields zero usable turns (all
+# leak-dropped, or an empty completion). Floor variants already re-attempted via their expand
+# rounds; the floorless 'short' flash had NO second chance — one leaked draft and the whole
+# variant silently skipped (2026-07-07, the missing short show).
+_EMPTY_DRAFT_RETRIES = 2
+# Pause before retrying after a full-chain LLM failure: the OpenRouter free tier 429s with
+# Retry-After ≈17s, so 25s clears the advertised window without stalling the render loop.
+_LLM_FAIL_BACKOFF_SEC = 25
+# Words the max_tokens budget can actually emit: content costs ~2.5 tok/word + speaker labels and
+# chapter markers on top (config sizes max_tokens at ceiling × 2.6); the stated ask uses a more
+# conservative 2.9 so a fully-compliant draft still finishes with a close instead of truncating.
+_ASK_TOKENS_PER_WORD = 2.9
+
+
+def _ask_words(spec: dict, min_words: int) -> int:
+    """Word target to STATE in the prompt for one variant. Floor variants overshoot the enforced
+    floor by BRIEFING_ASK_OVERSHOOT: models habitually undershoot a long stated target, so a
+    prompt that asks for exactly the floor makes the floor the model's ceiling of effort and an
+    under-floor draft's expand passes plateau just short of it (the 1170-word / 7-minute deep
+    dive of 2026-07-15). Asking past the floor makes the habitual undershoot land ON it. Capped
+    by the variant's hard ceiling and by what ``max_tokens`` can emit, so overshooting never
+    trades the short-draft problem for a truncated one. Enforcement is unchanged — the floor +
+    expand loop in ``_build_script`` stays the lever (failure mode #27)."""
+    ask = spec["target_words"]
+    if min_words > 0:
+        ask = max(ask, int(min_words * config.BRIEFING_ASK_OVERSHOOT))
+        ceiling = spec.get("ceiling") or 0
+        if ceiling > 0:
+            ask = min(ask, ceiling)
+        ask = min(ask, int(spec["max_tokens"] / _ASK_TOKENS_PER_WORD))
+    return ask
+
+
 def _build_script(date_label: str, signals: list[dict], variant: str,
                   min_words: int = 0) -> tuple[list[tuple[str, str, int]], list[str], str]:
     """LLM → (speech-normalized turns, chapter titles, model_used) for one length variant.
@@ -475,7 +555,8 @@ def _build_script(date_label: str, signals: list[dict], variant: str,
     spec = config.BRIEFING_VARIANT_SPECS.get(variant, config.BRIEFING_VARIANT_SPECS["standard"])
     system = prompts.build_briefing_system(config.BRIEFING_HOST_NAME, config.BRIEFING_EXPERT_NAME,
                                            variant)
-    user = prompts.build_briefing_user(date_label, spec["target_words"], signals,
+    ask = _ask_words(spec, min_words)   # stated target overshoots the enforced floor (see helper)
+    user = prompts.build_briefing_user(date_label, ask, signals,
                                        config.BRIEFING_HOST_NAME, config.BRIEFING_EXPERT_NAME,
                                        variant)
 
@@ -483,27 +564,61 @@ def _build_script(date_label: str, signals: list[dict], variant: str,
     best_titles: list[str] = []
     best_model = ""
     best_wc = -1
-    rounds = 1 + (config.BRIEFING_EXPAND_ROUNDS if min_words > 0 else 0)
+    best_truncated = True   # unset; any real draft is at least as good
+    base_user = user        # the expand pass rewrites `user`; a truncation retry reuses the base
+    rounds = 1 + max(config.BRIEFING_EXPAND_ROUNDS if min_words > 0 else 0, _EMPTY_DRAFT_RETRIES)
     for attempt in range(rounds):
         try:
-            content, model = llm.complete(system, user, max_tokens=spec["max_tokens"],
-                                          temperature=0.5)
+            content, model, finish = llm.complete_ex(system, user, max_tokens=spec["max_tokens"],
+                                                     temperature=0.5, skip_reasoning=True,
+                                                     timeout=config.BRIEFING_LLM_TIMEOUT_SEC)
         except Exception:
-            log.warning("briefing[%s]: LLM call failed (attempt %d)", variant, attempt + 1,
-                        exc_info=True)
-            break
-        turns, titles = _speaker_turns(_strip_think(content))
+            # A chain exhaustion consumes ONE attempt, it does not abandon the variant: the free
+            # fallbacks 429 with Retry-After ≈17s, so a short pause + retry usually lands where an
+            # immediate abort left the whole show unrendered (2026-07-15: six identical heal
+            # failures, each giving up on its first and only call).
+            log.warning("briefing[%s]: LLM call failed (attempt %d/%d)", variant, attempt + 1,
+                        rounds, exc_info=True)
+            if attempt + 1 < rounds:
+                time.sleep(_LLM_FAIL_BACKOFF_SEC)
+            continue
+        truncated = finish == "length"  # hit max_tokens → cut off mid-sentence, no sign-off
+        turns, titles = _speaker_turns(llm.strip_think(content))
         wc = _turns_word_count(turns)
-        if wc > best_wc:  # keep the longest valid draft — an expand pass can come back shorter
-            best_turns, best_titles, best_model, best_wc = turns, titles, model, wc
-        if best_wc >= min_words:
+        # Prefer a COMPLETE draft over a truncated one; only then does length break the tie. A
+        # truncated draft is longer purely because it was cut at the token ceiling — never let that
+        # length win over a cleanly-finished draft (the bug that shipped the mid-sentence show).
+        # An EMPTY draft (every turn leak-dropped) never becomes "best": with finish='stop' it
+        # would read as complete-with-0-words, beating a later truncated-but-real draft AND
+        # satisfying the floorless break below — the two holes behind the silent short-flash skip.
+        if turns and (best_wc < 0 or (best_truncated and not truncated)
+                or (best_truncated == truncated and wc > best_wc)):
+            best_turns, best_titles, best_model, best_wc, best_truncated = (
+                turns, titles, model, wc, truncated)
+        if not turns:
+            log.warning("briefing[%s]: draft produced no usable turns (attempt %d/%d)",
+                        variant, attempt + 1, rounds)
+        # A truncated draft never satisfies the floor — it stopped at the token ceiling, not a close.
+        if best_turns and best_wc >= min_words and not best_truncated:
             break
         if attempt + 1 < rounds and best_turns:
-            log.info("briefing[%s]: %d words < floor %d — expand pass %d/%d", variant, best_wc,
-                     min_words, attempt + 1, rounds - 1)
-            user = prompts.build_briefing_expand_user(
-                date_label, _labeled_transcript(best_turns, best_titles), best_wc, min_words,
-                signals, config.BRIEFING_HOST_NAME, config.BRIEFING_EXPERT_NAME)
+            if best_truncated:
+                # Expanding a truncated draft only truncates harder — retry the base prompt instead
+                # (temperature 0.5 gives a fresh draft that may finish within budget).
+                log.info("briefing[%s]: draft truncated at max_tokens (%d words) — retry %d/%d",
+                         variant, best_wc, attempt + 1, rounds - 1)
+                user = base_user
+            else:
+                log.info("briefing[%s]: %d words < floor %d — expand pass %d/%d (asking %d)",
+                         variant, best_wc, min_words, attempt + 1, rounds - 1, ask)
+                # The expand pass states the OVERSHOT ask too, not the bare floor — a pass that
+                # re-asks for exactly the floor tends to land just under it (see _ask_words).
+                user = prompts.build_briefing_expand_user(
+                    date_label, _labeled_transcript(best_turns, best_titles), best_wc, ask,
+                    signals, config.BRIEFING_HOST_NAME, config.BRIEFING_EXPERT_NAME)
+    if best_truncated and best_turns:
+        log.warning("briefing[%s]: best draft was truncated at max_tokens (%d words) — "
+                    "_finalize_close will trim + re-close it", variant, best_wc)
     if min_words > 0 and 0 <= best_wc < min_words:
         log.warning("briefing[%s]: still under floor after %d attempt(s) (%d/%d words)",
                     variant, rounds, best_wc, min_words)
@@ -518,8 +633,9 @@ def _build_script(date_label: str, signals: list[dict], variant: str,
                 prompts.BRIEFING_CHAPTER_REPAIR_SYSTEM,
                 prompts.build_briefing_chapter_repair_user(
                     _labeled_transcript(best_turns, best_titles)),
-                max_tokens=spec["max_tokens"], temperature=0.2)
-            r_turns, r_titles = _speaker_turns(_strip_think(content))
+                max_tokens=spec["max_tokens"], temperature=0.2, skip_reasoning=True,
+                timeout=config.BRIEFING_LLM_TIMEOUT_SEC)
+            r_turns, r_titles = _speaker_turns(llm.strip_think(content))
             r_wc = _turns_word_count(r_turns)
             # Adopt only if it actually added markers AND preserved the words (no rewrite/trim).
             if len(r_titles) >= 2 and r_wc >= best_wc * 0.95:
@@ -535,11 +651,70 @@ def _build_script(date_label: str, signals: list[dict], variant: str,
     return best_turns, best_titles, best_model
 
 
-# Canonical sign-off lines to re-attach when a ceiling trim drops the scripted close, so the show
-# always ends cleanly (mirrors the sign-offs in prompts.build_briefing_system). Keyed by variant.
+# Canonical sign-off lines to re-attach when a trim/truncation drops the scripted close, so the show
+# always ends cleanly (mirrors the sign-offs in prompts.build_briefing_system, already in spoken
+# form). Keyed by variant — one per variant, because `_finalize_close` guarantees a clean close on
+# ALL of them (not just the ceiling-trimmed standard show).
 _SIGN_OFF = {
+    "short": "That's the Flash. The full briefing and feed are at Horyon dot X Y Z.",
     "standard": "That's your Horyon briefing. The full feed and analysis are at Horyon dot X Y Z.",
+    "explainer": "That's your Horyon Deep Dive. The full feed and analysis are at Horyon dot X Y Z.",
 }
+# Does a turn already carry the scripted sign-off? Matches the distinctive close phrasing the prompt
+# uses (see prompts.py `_build_briefing_system_*`) so `_finalize_close` never double-signs a show the
+# model already closed. Kept phrase-anchored (not just "Horyon") so a mid-show mention can't match.
+_SIGNOFF_MARK_RE = re.compile(
+    r"That'?s (?:your|the) Horyon|That'?s the Flash|Horyon dot X Y Z", re.IGNORECASE)
+# Sentence-final punctuation (optionally trailed by a closing quote/bracket) at end of a turn.
+_SENT_END_RE = re.compile(r"[.!?][\"'”’)\]]*\s*$")
+# A sentence terminator that is FOLLOWED by whitespace (a real boundary) — used to find where the
+# last complete sentence ends so a dangling fragment can be cut. The look-ahead on whitespace keeps
+# it from firing on a decimal point ("2.5") or an abbreviation mid-number.
+_SENT_BOUNDARY_RE = re.compile(r"[.!?][\"'”’)\]]*(?=\s)")
+
+
+def _has_signoff(text: str) -> bool:
+    return bool(_SIGNOFF_MARK_RE.search(text or ""))
+
+
+def _trim_partial_sentence(text: str) -> str:
+    """Drop a dangling, incomplete final sentence from ``text`` (a max_tokens truncation, a dropped
+    stream, or a model that just stopped mid-thought). Keeps everything through the LAST complete
+    sentence; returns '' if the turn contains no complete sentence at all (so the caller drops the
+    whole fragment turn)."""
+    t = (text or "").rstrip()
+    if not t or _SENT_END_RE.search(t):
+        return t  # empty, or already ends on a complete sentence — leave it
+    last = None
+    for m in _SENT_BOUNDARY_RE.finditer(t):
+        last = m.end()
+    return t[:last].rstrip() if last else ""
+
+
+def _finalize_close(turns: list[tuple[str, str, int]], titles: list[str],
+                    variant: str) -> tuple[list[tuple[str, str, int]], list[str]]:
+    """Deterministic safety net (runs for EVERY variant, every render): guarantee the show ends on a
+    complete sentence AND carries its canonical sign-off. First trims/drops any dangling final
+    fragment (never leave a mid-sentence tail — the truncation-bug symptom); then, if the surviving
+    close isn't already the scripted sign-off, appends it in the HOST voice on the last chapter.
+    Idempotent — a script that already ends cleanly with its sign-off passes through unchanged."""
+    turns = list(turns)
+    # 1. Peel/trim a dangling final fragment so the last spoken line is a complete sentence.
+    while turns:
+        sp, txt, ch = turns[-1]
+        trimmed = _trim_partial_sentence(txt)
+        if trimmed:
+            if trimmed != txt:
+                turns[-1] = (sp, trimmed, ch)
+            break
+        turns.pop()
+    # 2. Guarantee the canonical close.
+    sign_off = _SIGN_OFF.get(variant)
+    if turns and sign_off and not _has_signoff(turns[-1][1]):
+        turns.append(("HOST", sign_off, turns[-1][2]))
+    if turns:
+        titles = titles[:max(ch for _, _, ch in turns) + 1]
+    return turns, titles
 
 
 def _enforce_ceiling(turns: list[tuple[str, str, int]], titles: list[str], ceiling: int,
@@ -573,6 +748,15 @@ def _enforce_ceiling(turns: list[tuple[str, str, int]], titles: list[str], ceili
     return kept, titles
 
 
+def _failed_marker_allowed(existing: "dict | None") -> bool:
+    """Whether a failed render may (re)write its 'failed' marker row. True when the variant has
+    no row yet or only a previous 'failed' marker — re-writing refreshes created_at so the heal
+    spacing gate (variants_needing_heal) measures from the LAST attempt, not the first. False for
+    ready/pending/blocked: a finished, in-flight, or fail-closed row is never clobbered by a
+    later failed re-render."""
+    return existing is None or existing.get("status") == "failed"
+
+
 def _variant_floor(variant: str, min_words_override: int = 0) -> int:
     """Word floor for a variant: 0 for variants that don't enforce one (the flash is a ceiling), else
     ``target_words * BRIEFING_MIN_WORD_RATIO``. ``min_words_override`` (e.g. the standard show's
@@ -600,6 +784,10 @@ def _render_variant(digest_date: date_t, date_label: str, signals: list[dict], v
     # modality gate, and TTS run on it, so the stored script, audio, and chapters all reflect the
     # trimmed show (keeps "the briefing" under ~9 minutes).
     turns, titles = _enforce_ceiling(turns, titles, spec.get("ceiling", 0), variant)
+    # Guarantee a clean close on EVERY variant: no mid-sentence tail, always the canonical sign-off.
+    # This is the deterministic backstop under the raised max_tokens + truncation detection, so even
+    # a residual cut-off draft (or a dropped TTS stream) can never ship a show that ends mid-word.
+    turns, titles = _finalize_close(turns, titles, variant)
     # Plain text (no speaker labels) drives the word count + the modality gate; the labeled
     # transcript is what we store and what the CLI prints.
     plain = " ".join(txt for _, txt, _ in turns)
@@ -607,6 +795,17 @@ def _render_variant(digest_date: date_t, date_label: str, signals: list[dict], v
     if not turns or word_count < 40:
         log.warning("briefing[%s]: empty/too-short script for %s (%d words) — skipping",
                     variant, digest_date, word_count)
+        existing = db.get_audio_briefing(digest_date, variant) if persist else None
+        if persist and _failed_marker_allowed(existing):
+            # Durable 'failed' marker (no audio) so the miss surfaces in pipeline_check §10 and
+            # stays retryable by --backfill (the audio backfill queries skip status='failed').
+            # Re-written on EVERY failed attempt so created_at tracks the LAST attempt — the
+            # 75-min heal spacing gate (variants_needing_heal) keys off it, and a frozen
+            # first-failure timestamp let the heal re-fire every 20-min cycle (2026-07-15).
+            # A ready/pending/blocked row is never overwritten (_failed_marker_allowed).
+            db.upsert_audio_briefing(digest_date=digest_date, variant=variant,
+                                     script=_format_transcript(turns) if turns else "",
+                                     model_used=model, status="failed")
         return None
     script = _format_transcript(turns)
 
@@ -752,6 +951,62 @@ def build_all_variants_for_date(digest_date: date_t | None = None, persist: bool
         if v == "standard" and r:
             standard_wc = r.get("word_count") or 0
     return out
+
+
+# ── Same-day AUDIO self-heal (mirrors digest.should_retry_digest / failure mode #31) ─────────
+# The 07:00 post-digest builds all three length variants in one pass, but a transient LLM outage
+# at that minute (NIM timeout on the heavy explainer + OpenRouter 429s) can leave a variant
+# 'failed' with an EMPTY script — most often the explainer, whose ~2400-word two-voice draft is the
+# biggest generation in the pipeline (observed 2026-07-08..10: standard/short rendered, explainer
+# failed, so the site showed only the "Briefing" length). Nothing retried it: `build_all_variants`
+# swallows per-variant failure (stores the durable 'failed' marker) so orchestrate_post_digest's
+# run_step sees success, and the digest self-heal only fires when the whole day is empty. This is
+# the missing backstop — the 20-min ingest cycle re-renders ONLY the missing/failed variants later
+# in the day, when the models are reachable again (a manual rebuild of those days succeeds). Pure
+# decision here; the effecting side + Telegram late-send live in main._maybe_heal_audio.
+AUDIO_HEAL_MIN_GAP_MIN = 75      # a 'failed' variant is retried only once its last attempt is this old
+AUDIO_HEAL_EARLIEST_UTC = 8      # never before 08:00 — the 07:00 build + its run_step retries own that hour
+AUDIO_HEAL_LATEST_UTC = 22       # stop late in the day — a variant healed near midnight helps no one for "today"
+
+
+def variants_needing_heal(
+    rows: "list[dict]",
+    bullets_exist: bool,
+    now_utc: datetime,
+    *,
+    variants: "tuple[str, ...]" = config.BRIEFING_VARIANTS,
+    gap_min: int = AUDIO_HEAL_MIN_GAP_MIN,
+    earliest_utc: int = AUDIO_HEAL_EARLIEST_UTC,
+    latest_utc: int = AUDIO_HEAL_LATEST_UTC,
+) -> "tuple[str, ...]":
+    """Pure decision: which audio variants for a date should be (re)built right now.
+
+    ``rows`` = today's ``digest_audio`` rows as dicts (variant, status, created_at), any order —
+    see ``db.get_audio_variant_status``. ``bullets_exist`` gates the whole thing: no digest bullets
+    means there is nothing to narrate (and the digest self-heal, not this, owns a missing digest).
+    A variant needs healing when it has NO row, or a 'failed' row whose last attempt is ≥ ``gap_min``
+    minutes old. 'ready'/'pending' (done/in-flight) and 'blocked' (terminal fail-closed modality
+    verdict) are never re-rendered. Returns () outside the [earliest, latest) UTC window or when
+    nothing qualifies. The gap gate bounds cost: at most one retry per variant per ``gap_min``."""
+    if not bullets_exist:
+        return ()
+    if not (earliest_utc <= now_utc.hour < latest_utc):
+        return ()
+    by_variant = {r["variant"]: r for r in rows}
+    need: list[str] = []
+    for v in variants:
+        r = by_variant.get(v)
+        if r is None:
+            need.append(v)                       # never attempted this variant
+        elif r.get("status") == "failed":
+            last = r.get("created_at")
+            if last is None:
+                need.append(v)
+                continue
+            if now_utc - util.as_utc(last) >= timedelta(minutes=gap_min):
+                need.append(v)
+        # ready / pending / blocked → leave alone
+    return tuple(need)
 
 
 def _print_variant(r: "dict | None", variant: str) -> None:

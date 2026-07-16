@@ -27,7 +27,6 @@ from app.threads import (
     _is_asset_surface,
     _masthead_date,
     _rank_line,
-    _strip_think,
     _validate_handles,
 )
 
@@ -52,20 +51,6 @@ def test_dedash_leaves_plain_hyphenated_words():
 
 def test_dedash_handles_none():
     assert _dedash(None) == ""
-
-
-# ── _strip_think ─────────────────────────────────────────────────────────────
-
-def test_strip_think_removes_closed_block():
-    assert _strip_think("<think>plan plan</think>Real tweet") == "Real tweet"
-
-
-def test_strip_think_removes_unclosed_trailing_block():
-    assert _strip_think("Real tweet <think>runaway reasoning to the end") == "Real tweet"
-
-
-def test_strip_think_noop_when_clean():
-    assert _strip_think("just a tweet") == "just a tweet"
 
 
 # ── _clip / _fit / _fit_whole ────────────────────────────────────────────────

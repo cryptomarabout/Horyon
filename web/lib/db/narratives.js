@@ -269,12 +269,18 @@ export async function getEntityGraph({ maxNodes = 240, minWeight = 2 } = {}) {
               p.tvl_change_7d::float8 AS tvl_change_7d,
               p.mcap_tvl::float8 AS mcap_tvl,
               p.token_symbol, p.chains,
+              m.price_usd::float8 AS price_usd, m.market_cap_usd::float8 AS market_cap_usd,
+              m.fdv_usd::float8 AS fdv_usd, m.circulating_supply::float8 AS circulating_supply,
+              m.total_supply::float8 AS total_supply,
+              m.price_change_7d_pct::float8 AS price_change_7d_pct,
               d.strength, d.degree, n.state AS narrative_state,
               (av.slug IS NOT NULL) AS avatar_cached
        FROM deg d
        JOIN entity_memory e ON e.slug = d.slug
        LEFT JOIN defillama_protocols p ON p.slug = e.slug
        LEFT JOIN entity_avatars av ON av.slug = e.slug
+       LEFT JOIN coingecko_market m
+         ON m.gecko_id = e.slug AND m.fetched_at > now() - INTERVAL '3 days'
        LEFT JOIN LATERAL (
          SELECT state FROM narratives
          WHERE d.slug = ANY(entity_slugs)
@@ -309,6 +315,12 @@ export async function getEntityGraph({ maxNodes = 240, minWeight = 2 } = {}) {
       tvlChange1d: r.tvl_change_1d ?? null,
       tvlChange7d: r.tvl_change_7d ?? null,
       mcapTvl: r.mcap_tvl ?? null,
+      price: r.price_usd ?? null,
+      marketCap: r.market_cap_usd ?? null,
+      fdv: r.fdv_usd ?? null,
+      circulatingSupply: r.circulating_supply ?? null,
+      totalSupply: r.total_supply ?? null,
+      priceChange7d: r.price_change_7d_pct ?? null,
       tokenSymbol: r.token_symbol || null,
       chains: Array.isArray(r.chains) ? r.chains : [],
       category: r.category || null,

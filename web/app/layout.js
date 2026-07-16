@@ -19,6 +19,7 @@ import Header from "./components/Header";
 import MarketBandeau from "./components/MarketBandeau";
 import { XIcon } from "./components/icons";
 import AudioProvider from "./components/AudioProvider";
+import ServiceWorker from "./components/ServiceWorker";
 import { getTvlWithChange } from "../lib/db";
 import { getMarketData } from "../lib/prices";
 
@@ -39,6 +40,8 @@ export const metadata = {
   },
   description: DESCRIPTION,
   applicationName: "Horyon",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "Horyon" },
   keywords: [
     "crypto intelligence", "crypto news", "DeFi", "onchain", "blockchain",
     "daily digest", "crypto market", "Horyon",
@@ -72,6 +75,15 @@ export const metadata = {
     ],
     apple: "/apple-touch-icon.png",
   },
+};
+
+// Theme color drives the mobile browser chrome + PWA splash. Matches --bg per theme so
+// the installed app's status bar blends into the page in both light and dark.
+export const viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: "#060606" },
+    { media: "(prefers-color-scheme: light)", color: "#F7F8FA" },
+  ],
 };
 
 // Footer market ticker — fetches CoinGecko (getMarketData) + TVL. Isolated in its own
@@ -117,6 +129,7 @@ document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
         `.trim() }} />
       </head>
       <body>
+        <ServiceWorker />
         <AudioProvider>
         <Header />
         <main className="reader">{children}</main>

@@ -24,7 +24,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from . import config, db, entities
+from . import config, db, entities, util
 
 log = logging.getLogger(__name__)
 
@@ -34,14 +34,6 @@ MIN_EDGE_WEIGHT = getattr(config, "ENTITY_GRAPH_MIN_WEIGHT", 2)   # pair must co
 MIN_MENTIONS    = getattr(config, "ENTITY_GRAPH_MIN_MENTIONS", 2) # entity floor for a node
 MAX_ITEM_CHARS  = 4000   # cap text scanned per item
 MAX_ITEMS       = 40000
-
-_TAG_RE = re.compile(r"<[^>]+>")
-_WS_RE  = re.compile(r"\s+")
-
-
-def _plain(text: str) -> str:
-    return _WS_RE.sub(" ", _TAG_RE.sub(" ", text or "")).strip()
-
 
 def _build_matcher() -> tuple[re.Pattern | None, dict[str, str]]:
     """One big alternation regex of every matchable term → {lowered term: slug}.
@@ -93,7 +85,7 @@ def _count_digest_mentions(pat: re.Pattern, term_to_slug: dict[str, str]) -> dic
         return {}
     counts: dict[str, int] = defaultdict(int)
     for b in bullets:
-        text = _plain(((b.get("title") or "") + " " + (b.get("body") or "")))[:MAX_ITEM_CHARS]
+        text = util.plain_text(((b.get("title") or "") + " " + (b.get("body") or "")))[:MAX_ITEM_CHARS]
         if not text:
             continue
         slugs = {
@@ -127,7 +119,7 @@ def build_and_store(days: int = WINDOW_DAYS, persist: bool = True,
     n_docs = 0                                     # items with ≥1 entity (NPMI sample space)
 
     for it in items:
-        full = _plain(it.get("content") or "")
+        full = util.plain_text(it.get("content") or "")
         text = full[:MAX_ITEM_CHARS]
         if not text:
             continue

@@ -12,6 +12,13 @@ export function fmtTvl(usd) {
   return null;
 }
 
+// Token price: 2 decimals at $1+, up to 4 significant figures below $1 (a sub-cent
+// altcoin price rounded to 2dp would print as $0.00). Returns null for nullish input.
+export function fmtPrice(usd) {
+  if (usd == null) return null;
+  return usd >= 1 ? `$${usd.toFixed(2)}` : `$${usd.toPrecision(4)}`;
+}
+
 // Short relative time with an "ago" suffix: now · 12m ago · 3h ago · 2d ago.
 export function fmtAgo(iso) {
   if (!iso) return null;

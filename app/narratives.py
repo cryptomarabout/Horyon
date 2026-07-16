@@ -33,7 +33,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date as date_t, datetime, time, timedelta, timezone
 
-from . import config, db, embeddings, entities, llm, prompts
+from . import config, db, embeddings, entities, llm, prompts, util
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +49,20 @@ COSINE_STRONG = 0.88       # embedding-only merge threshold — crypto text is d
 COSINE_SUPPORT = 0.75      # embedding threshold when ≥1 shared entity
 MIN_SIGNAL_RELEVANCE = 0.62  # post-cluster prune: drop signals below this cosine to recomputed centroid
 MAX_LLM_SYNTHESES = 20     # cap LLM synthesis calls per rebuild
-R_MIN = 1.2                # min recent mass for "heating"
+# Momentum thresholds, recalibrated 2026-07-07 against the MEASURED distribution. The +1/+1
+# Laplace smoothing in ρ=(R+1)/(B+1) squashes the ratio into ~[0.77, 1.18] at real signal
+# masses (R and B are mostly <0.5 — ~7 scored bullets/day spread over 10+ clusters), so the
+# old gates (heating ρ≥1.5 ∧ R≥1.2, cooling ρ≤0.7) were structurally unreachable: the board
+# sat 10 steady / 8 dormant with ZERO heating/forming/cooling for weeks. New semantics:
+#   heating — meaningfully above its own baseline (ρ≥1.15) with real recent mass (R≥0.5,
+#             ≈ one strong signal in 48h). The ratio gate + the source-diversity cap below
+#             still block single-account manufactured momentum.
+#   cooling — a cluster that HAD a real baseline (B≥0.15) and went silent in the last 48h
+#             (R=0), or the legacy deep-ratio drop (ρ≤0.7, only mega-clusters can reach it).
+# Replay states with `python -m app.narratives --no-persist` before touching these again.
+R_MIN = 0.5
+RHO_HEATING = 1.15
+COOLING_BASELINE_MIN = 0.15
 DEFAULT_MASS = {"news": 0.5, "podcast": 0.55, "governance": 0.6, "market": 0.5}
 
 # DAO governance proposals make poor narrative drivers: they're numerous, bursty
@@ -451,9 +464,7 @@ def _gather_signals(matcher: _EntityMatcher, days: int, ref: datetime) -> list[d
             title = (a.get("tldr") or ep.get("title") or "").strip()[:180]
             text = f"{title} {body}".strip()
             pub = ep.get("published_at")
-            ts = pub if isinstance(pub, datetime) else ref
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+            ts = util.as_utc(pub if isinstance(pub, datetime) else ref)
             signals.append({
                 "signal_type": "podcast",
                 "signal_ref": f"pod:{ep['video_id']}",
@@ -486,9 +497,7 @@ def _gather_signals(matcher: _EntityMatcher, days: int, ref: datetime) -> list[d
             body = (r.get("content") or "")[:800]
             text = f"{title} {body}".strip()
             pub = r.get("ts")
-            ts = pub if isinstance(pub, datetime) else ref
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+            ts = util.as_utc(pub if isinstance(pub, datetime) else ref)
             signals.append({
                 "signal_type": "news",
                 "signal_ref": f"kaiko:{_slugify(title)[:48]}",
@@ -510,9 +519,7 @@ def _gather_signals(matcher: _EntityMatcher, days: int, ref: datetime) -> list[d
                 space = p.get("space_name") or ""
                 text = f"{space} {title}".strip()
                 st = p.get("start_ts")
-                ts = st if isinstance(st, datetime) else ref
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
+                ts = util.as_utc(st if isinstance(st, datetime) else ref)
                 ents = matcher.match(text)
                 # tie the proposal to its space's entity even if the name isn't in the text
                 ents = list(dict.fromkeys(ents + matcher.match(space)))
@@ -779,11 +786,14 @@ def _momentum(cluster: dict, ref: datetime) -> dict:
 
     if last_age_h > 168:
         state = "dormant"
-    elif age_h <= 72 and n <= 3:
+    elif age_h <= 96 and n <= 4:
+        # ≤96h / n≤4 (was 72h / 3): a cluster needs ≥3 signals across ≥2 distinct days to
+        # exist at all, so the old window made "forming" a near-empty state (0 on the board
+        # for weeks, measured 2026-07-07).
         state = "forming"
-    elif rho >= 1.5 and R >= R_MIN:
+    elif rho >= RHO_HEATING and R >= R_MIN:
         state = "heating"
-    elif rho <= 0.7:
+    elif (R == 0 and B >= COOLING_BASELINE_MIN) or rho <= 0.7:
         state = "cooling"
     else:
         state = "steady"

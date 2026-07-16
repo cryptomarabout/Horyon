@@ -137,7 +137,10 @@ SOURCES: list[str] = [
     # aggregator (World Cup, geopolitics, SpaceX) reframed as "...crypto impact", which
     # slips past any keyword filter. Was 26.8% of the corpus and polluted entity
     # extraction / narratives / recent-mentions. Do NOT re-add without a relevance gate.
-    "https://insights.glassnode.com/rss/",
+    # Moved from insights.glassnode.com/rss/ (2026-07-07): the old host started 403-ing the
+    # fetcher behind Cloudflare after Glassnode relocated the blog — 2,513 consecutive
+    # failures before anyone actioned the chronic-failure log line. Same publication.
+    "https://research.glassnode.com/rss/",
     "https://www.bankless.com/feed",
     "https://cointelegraph.com/rss",
     "https://cointelegraph.com/rss/tag/business",

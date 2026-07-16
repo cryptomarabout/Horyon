@@ -23,6 +23,14 @@ CREATE TABLE IF NOT EXISTS feed_items (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS feed_items_content_hash_key ON feed_items (content_hash);
 
+-- Ingest-time quality gate (title_content_coherence_check in app/ingest.py): the raw RSS
+-- item title + a cheap heuristic flag ('ok' | 'thin_content' | 'nitter_handle_title' |
+-- 'boilerplate_title'). Consumed by scoring corroboration (thin items don't corroborate)
+-- and the LLM input paths (search_feed excludes thin items; the digest prompt annotates
+-- thin/roundup items). Already live in prod; declared here so fresh volumes match.
+ALTER TABLE feed_items ADD COLUMN IF NOT EXISTS title varchar(512);
+ALTER TABLE feed_items ADD COLUMN IF NOT EXISTS quality_flag varchar(32) NOT NULL DEFAULT 'ok';
+
 -- Full-text search column for the PUBLIC free-text search bar. HTML is stripped first
 -- (regexp_replace is IMMUTABLE, so it is allowed in a generated column) so tags don't
 -- pollute the lexeme set. This replaces per-query Ollama embedding on the free-text
@@ -131,6 +139,23 @@ CREATE TABLE IF NOT EXISTS defillama_protocols (
     url           text,
     description   text,
     gecko_id      text
+);
+
+-- CoinGecko market-data snapshot (price/mcap/FDV/supply) — analyst-grade token facts,
+-- refreshed on a cron (app.defillama.fetch_and_store_market_data). Joined to entities by
+-- gecko_id == entity_memory.slug (see docs/conventions.md for why that's a reliable key).
+CREATE TABLE IF NOT EXISTS coingecko_market (
+    gecko_id             text        PRIMARY KEY,
+    symbol               text,
+    price_usd            double precision,
+    market_cap_usd       double precision,
+    fdv_usd              double precision,
+    circulating_supply   double precision,
+    total_supply         double precision,
+    market_cap_rank      int,
+    price_change_24h_pct double precision,
+    price_change_7d_pct  double precision,
+    fetched_at           timestamptz NOT NULL DEFAULT now()
 );
 
 -- Entity memory: one row per tracked entity (protocol, chain, fund, person, exchange).
@@ -337,6 +362,30 @@ CREATE TABLE IF NOT EXISTS podcast_episodes (
 CREATE INDEX IF NOT EXISTS podcast_episodes_published_idx ON podcast_episodes (published_at DESC);
 CREATE INDEX IF NOT EXISTS podcast_episodes_status_idx ON podcast_episodes (status);
 
+-- Podcast prediction follow-through (T14). Each 'prediction' the reduce pass extracts
+-- becomes a row here at summarize time; a monthly DETERMINISTIC recheck
+-- (podcasts.recheck_predictions — zero LLM) word-boundary-matches each open prediction's
+-- entities against later digest coverage and records whether related coverage has since
+-- appeared. This is the only place the system tracks forward-looking claims. outcome:
+-- 'open' (awaiting) | 'corroborated' (matching later coverage found) | 'stale' (window
+-- elapsed, no coverage). It is a HONEST "coverage appeared" signal, never an LLM verdict
+-- on whether the call was right.
+CREATE TABLE IF NOT EXISTS podcast_predictions (
+    id           serial      PRIMARY KEY,
+    video_id     text        NOT NULL,
+    channel      text        NOT NULL DEFAULT '',
+    claim        text        NOT NULL,
+    entities     jsonb       NOT NULL DEFAULT '[]'::jsonb,  -- resolved entity slugs the claim names
+    predicted_at timestamptz,                               -- the episode's published_at
+    outcome      text        NOT NULL DEFAULT 'open',       -- open | corroborated | stale
+    evidence     jsonb       NOT NULL DEFAULT '[]'::jsonb,  -- [{date, title, link}] matching digest bullets
+    checked_at   timestamptz,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (video_id, claim)
+);
+CREATE INDEX IF NOT EXISTS podcast_predictions_outcome_idx ON podcast_predictions (outcome);
+CREATE INDEX IF NOT EXISTS podcast_predictions_predicted_idx ON podcast_predictions (predicted_at DESC);
+
 -- Narratives: persistent clusters of cross-source signals carrying a momentum state.
 -- Built periodically (post-digest + cron) by app/narratives.py from digest_bullet_analysis
 -- (news), podcast_episodes (podcast), and governance_proposals (governance). The momentum
@@ -401,3 +450,36 @@ CREATE TABLE IF NOT EXISTS entity_edges (
 CREATE INDEX IF NOT EXISTS entity_edges_a_idx      ON entity_edges (slug_a);
 CREATE INDEX IF NOT EXISTS entity_edges_b_idx      ON entity_edges (slug_b);
 CREATE INDEX IF NOT EXISTS entity_edges_weight_idx ON entity_edges (weight DESC);
+
+-- Entity review verdicts — durable decision memory for entity hygiene (2026-07-05).
+-- 'block': the slug is confirmed extraction junk (e.g. an entity literally named
+--   "would"/"zero") — upsert_entity refuses to (re)create it, killing the
+--   audit → delete → re-extracted-next-cycle loop.
+-- 'keep': a human reviewed a flagged collision-risk entity and confirmed it is a
+--   real project — the stored-data audit stops re-flagging it on every run.
+-- Written by `python3 -m app.entity_audit purge-collisions` / `keep`, and read by
+-- app/db/entities.upsert_entity + app/audit.check_collision_risk.
+CREATE TABLE IF NOT EXISTS entity_review (
+    slug       text PRIMARY KEY,
+    verdict    text NOT NULL CHECK (verdict IN ('keep', 'block')),
+    reason     text NOT NULL DEFAULT '',
+    decided_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Scored LLM grounding eval runs (T10/T11 — app/eval_harness.py, weekly cron + on-demand
+-- before prompt/model-chain changes). One row per path×case; rows in the same run share
+-- run_at. checks = {check_name: bool}. Bot-only: the web never reads this table, so no
+-- web_db_role.sql grant is needed.
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id         serial      PRIMARY KEY,
+    run_at     timestamptz NOT NULL DEFAULT now(),
+    run_kind   text        NOT NULL DEFAULT 'manual',  -- 'manual' | 'weekly-cron'
+    path       text        NOT NULL,  -- digest | analyst | brief | thread | briefing | narrative
+    case_name  text        NOT NULL,  -- 'baseline' | 'inj-*' (prompt-injection suite)
+    model_used text        NOT NULL DEFAULT '',
+    checks     jsonb       NOT NULL,
+    passed     int         NOT NULL,
+    failed     int         NOT NULL,
+    notes      text        NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS eval_runs_run_at_idx ON eval_runs (run_at DESC);

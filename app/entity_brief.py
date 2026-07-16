@@ -1,11 +1,13 @@
 """Entity Intel Briefs: pre-compute per-entity updates post-digest.
 
-Triggered once per day after the daily digest runs. For EVERY entity that appears
-(word-boundary match) in that day's bullets — no mention-count floor — generates a
-brief using:
+Triggered once per day after the daily digest runs. For every entity the SHARED
+runtime matcher (entities.detect_entities_in_text — word boundaries, generic-term
+rejection, case-sensitive ambiguous brands) finds in that day's bullets, generates
+a brief using:
   - Today's digest bullets mentioning the entity
   - Historical digest bullets (last 14 days)
-  - Recent feed items (semantic search, last 14 days)
+  - Recent feed items (semantic search, last 14 days — anchor-gated to items that
+    actually NAME the entity, since ANN search always returns topk)
 
 Stored in entity_intel_brief; served by specialized.py and /api/search as an
 instant cache hit that bypasses the full ReAct loop.
@@ -15,35 +17,76 @@ from __future__ import annotations
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date as date_t
+from datetime import date as date_t, datetime, timedelta, timezone
 
-from . import db, llm, prompts
+from . import db, entities, llm, prompts, util
 
 log = logging.getLogger(__name__)
 
-_TAG_RE = re.compile(r"<[^>]+>")
-_HTML_ENTITIES = {
-    "&amp;": "&", "&lt;": "<", "&gt;": ">",
-    "&quot;": '"', "&#39;": "'", "&apos;": "'", "&nbsp;": " ",
-}
-
 # A reasoning fallback model (e.g. nemotron) emits its chain-of-thought ("We need to
-# produce an intel brief…") before — or instead of — the brief. Strip <think> blocks and
-# any preamble before the first 🔎 header / • bullet, then require ≥1 bullet, else reject
-# (a cached reasoning-leak is worse than a cache miss → falls through to the live agent).
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-_THINK_OPEN_RE = re.compile(r"<think>.*\Z", re.DOTALL | re.IGNORECASE)
+# produce an intel brief…") before — or instead of — the brief. Strip <think> blocks
+# (llm.strip_think) and any preamble before the first 🔎 header / • bullet, then require
+# ≥1 bullet, else reject (a cached reasoning-leak is worse than a cache miss → falls
+# through to the live agent).
+
+# Template-echo / planning-leak rejection (2026-07-07 incident): nemotron echoed the
+# ENTITY_BRIEF_SYSTEM output template ITSELF — which contains a literal bullet line
+# ("• <b>Short title</b> — What happened. Why it matters.") — followed by its planning prose
+# ("We need to prioritize hacks/exploits…"). The header+bullet shape satisfied the structural
+# "has a •" check below, so 6 garbage briefs (Morpho, Jito, Securitize…) were persisted and
+# served on /api/search. Phrases are anchored to THIS prompt's template text plus the planning
+# vocabulary proven in digest._ANALYSIS_LEAK_RE — validated against all 540 stored briefs:
+# exactly the 6 contaminated rows match, 0 false positives.
+_BRIEF_LEAK_RE = re.compile(
+    r"Short title|What happened\. Why it matters|3[–-]5 bullets|"
+    r"\bwe need to (?:write|produce|generate|create|extract|summarize|prioriti[sz]e|order|pick|include|list)\b|"
+    r"\bwe should (?:prioriti[sz]e|order|pick|include)\b|"
+    r"\bi need to (?:write|produce|generate|list|order)\b|"
+    r"\blet me (?:think|write|draft|check|parse|list)\b|"
+    r"\bthe user wants\b|\bprioriti[sz]e hacks\b",
+    re.IGNORECASE,
+)
 
 
-def _decode(s: str) -> str:
-    return re.sub(r"&[a-z#0-9]+;", lambda m: _HTML_ENTITIES.get(m.group(), m.group()), s)
+_decode = util.decode_entities
+
+
+_DASH_BULLET_RE = re.compile(r"^-\s+")
+
+
+def _normalize_brief_format(text: str) -> str:
+    """Canonicalize formatting drift the model sometimes emits despite the prompt's
+    explicit template. Observed drift (measured on 2026-07-05: 0 of 20 sampled briefs
+    had a line starting with '•', so this isn't a rare edge case — it's the norm):
+      1. Header + first bullet merged on one line via an inline ' • ' separator
+         ("🔎 <b>Aave</b> • <b>Title</b> — body...") instead of the header standing
+         alone with the bullet starting its own line.
+      2. Continuation bullets marked with a leading '-' instead of '•'.
+    Both are invisible to a reader but break every consumer that keys off a literal
+    line-leading '•' (web SearchPanel, Telegram render) — those consumers render
+    NOTHING for a line they don't recognize as a bullet, rather than erroring, so a
+    drifted brief silently looked like an empty result. Fix at the source so every
+    consumer can keep the simple "line starts with •" contract."""
+    out = []
+    for ln in text.split("\n"):
+        s = ln.strip()
+        if s.startswith("🔎") and " • " in s:
+            head, _, rest = s.partition(" • ")
+            out.append(head)
+            out.append("")
+            out.append("• " + rest)
+        elif _DASH_BULLET_RE.match(s):
+            out.append("• " + _DASH_BULLET_RE.sub("", s))
+        else:
+            out.append(ln)
+    return "\n".join(out)
 
 
 def _clean_brief(content: str) -> str:
     """Keep only the brief itself: the 🔎 header + • bullet lines, dropping leaked reasoning."""
     if not content:
         return ""
-    text = _THINK_OPEN_RE.sub("", _THINK_RE.sub("", content))
+    text = llm.strip_think(content)
     kept, started = [], False
     for ln in text.splitlines():
         s = ln.strip()
@@ -53,7 +96,13 @@ def _clean_brief(content: str) -> str:
             else:
                 continue  # skip preamble / planning lines
         kept.append(ln)
-    return "\n".join(kept).strip()
+    text = _normalize_brief_format("\n".join(kept).strip())
+    # Reject the whole completion when what survived still reads as a template echo or
+    # planning prose (see _BRIEF_LEAK_RE) — a dropped brief beats a served one, and the
+    # /api/search route falls back to a deterministic feed render on a cache miss.
+    if _BRIEF_LEAK_RE.search(text):
+        return ""
+    return text
 
 
 def _parse_bullets(html: str) -> list[dict]:
@@ -77,55 +126,108 @@ def _parse_bullets(html: str) -> list[dict]:
     return bullets
 
 
+def _chunks_for_matcher(text: str, size: int = 280) -> list[str]:
+    """Word-aligned windows ≤ ``size`` chars, with a small tail overlap.
+
+    entities.detect_entities_in_items scans only the first ~300 chars of each item
+    (its plain_text limit), so a whole digest passed as one string would silently lose
+    every entity after the first bullets. The overlap keeps a name that straddles a
+    window boundary matchable."""
+    text = (text or "").strip()
+    if len(text) <= size:
+        return [text] if text else []
+    out: list[str] = []
+    cur = ""
+    for w in text.split():
+        if cur and len(cur) + 1 + len(w) > size:
+            out.append(cur)
+            cur = " ".join(cur.split()[-5:] + [w])
+        else:
+            cur = f"{cur} {w}" if cur else w
+    if cur:
+        out.append(cur)
+    return out
+
+
 def _find_entities_in_text(plain_text: str) -> list[dict]:
-    """Return every entity_memory row that appears word-boundary in text.
+    """Return every entity_memory row that appears in text (full rows: slug, name,
+    type, aliases — the aliases feed the per-entity anchor pattern below).
 
-    No mention-count floor: the public web serves these briefs as the ONLY answer for
-    an entity-tag click (the live-LLM fallback was removed), so coverage must equal the
-    set of entities that can appear as a clickable tag — i.e. anything mentioned in a
-    bullet, even on its first appearance.
+    Uses the SHARED runtime matcher (entities.detect_entities_in_items over
+    word-aligned chunks) so brief coverage obeys the same false-positive gates as
+    every other surface — word boundaries, generic-vocabulary rejection, and
+    CASE-SENSITIVE matching for ambiguous single-word brands (Flow/Exodus). The
+    previous hand-rolled IGNORECASE loop matched 'Flow' in "cash flow" and generated
+    a persisted brief about the wrong entity from unrelated text.
     """
-    all_entities = db.get_entities_for_briefing(min_mentions=1)
-    found: list[dict] = []
-    seen: set[str] = set()
-    for slug, name, type_, aliases in all_entities:
-        if slug in seen:
+    try:
+        items = [{"content": c} for c in _chunks_for_matcher(plain_text)]
+        if not items:
+            return []
+        slugs = entities.detect_entities_in_items(items)
+        if not slugs:
+            return []
+        return [dict(r) for r in db.get_entities_by_slugs(slugs)]
+    except Exception:
+        log.warning("entity brief: shared entity detection failed", exc_info=True)
+        return []
+
+
+def _entity_anchor(entity: dict) -> "re.Pattern | None":
+    """Word-boundary pattern over the entity's name + distinctive aliases — the gate
+    that keeps semantic-search results honest (ANN always returns topk, so without it
+    topically-adjacent items that never mention the entity enter the prompt and get
+    ATTRIBUTED to it). Ambiguous single-word brand names (Flow, Exodus, AERO) match
+    case-sensitively, mirroring the shared runtime matcher. None when no usable term."""
+    ci_terms: set[str] = set()
+    cs_terms: set[str] = set()
+    for term in [entity.get("name") or "", *(entity.get("aliases") or [])]:
+        t = (term or "").strip()
+        if not t or t.startswith("@") or len(t) < 3 or t.lower() in entities.GENERIC_TERMS:
             continue
-        candidates = [name] + (aliases or [])
-        for candidate in candidates:
-            if not candidate or len(candidate) < 3:
-                continue
-            pattern = r"\b" + re.escape(candidate) + r"\b"
-            if re.search(pattern, plain_text, re.IGNORECASE):
-                found.append({"slug": slug, "name": name, "type": type_})
-                seen.add(slug)
-                break
-    return found
+        if entities._ambiguous_single_word(t):
+            cs_terms.add(t)
+        else:
+            ci_terms.add(t)
+    parts: list[str] = []
+    if ci_terms:
+        parts.append("(?i:" + "|".join(re.escape(t) for t in sorted(ci_terms)) + ")")
+    for t in sorted(cs_terms):
+        parts.append(re.escape(t) + "|" + re.escape(t.upper()))
+    if not parts:
+        return None
+    return re.compile(r"\b(?:" + "|".join(parts) + r")\b")
 
 
-def _get_historical_bullets_for_entity(entity_name: str, days: int = 14) -> list[dict]:
-    """Return digest bullets from the last N days (excluding today) that mention entity_name."""
+def _get_historical_bullets_for_entity(anchor: "re.Pattern", days: int = 14) -> list[dict]:
+    """Return digest bullets from the last N days (excluding today) matching the anchor."""
     rows = db.get_digest_contents_for_dedup(days=days)
-    pattern = re.compile(r"\b" + re.escape(entity_name) + r"\b", re.IGNORECASE)
     matching: list[dict] = []
     for d, content in rows:
         if not content:
             continue
         for bullet in _parse_bullets(content):
             text = bullet.get("title", "") + " " + bullet.get("body", "")
-            if pattern.search(text):
+            if anchor.search(text):
                 matching.append({"date": str(d), **bullet})
     return matching
 
 
-def _fmt_usd(v: float) -> str:
+_fmt_usd = util.fmt_usd
+
+
+def _fmt_price(v: float) -> str:
+    return f"${v:,.2f}" if v >= 1 else f"${v:,.4g}"
+
+
+def _fmt_num(v: float) -> str:
     if v >= 1e12:
-        return f"${v / 1e12:.2f}T"
+        return f"{v / 1e12:.2f}T"
     if v >= 1e9:
-        return f"${v / 1e9:.1f}B"
+        return f"{v / 1e9:.2f}B"
     if v >= 1e6:
-        return f"${v / 1e6:.0f}M"
-    return f"${v:,.0f}"
+        return f"{v / 1e6:.1f}M"
+    return f"{v:,.0f}"
 
 
 def _entity_db_facts(slug: str, name: str) -> str:
@@ -151,11 +253,38 @@ def _entity_db_facts(slug: str, name: str) -> str:
             lines.append(f" - Recent governance: {titles}")
     except Exception:
         log.debug("entity brief: governance fetch failed for %r", name, exc_info=True)
+    try:
+        # Joined by gecko_id == slug — only ever populated when our slug happens to
+        # equal CoinGecko's own coin id (see coingecko_market's schema comment). An
+        # entity whose token isn't top-500 by market cap, or whose slug diverges,
+        # simply gets no market line here — never a fabricated one.
+        mkt = {m["gecko_id"]: m for m in db.get_market_data_by_slugs([slug])}.get(slug)
+        if mkt and mkt.get("market_cap_usd") is not None:
+            bits = []
+            if mkt.get("price_usd") is not None:
+                bits.append(f"price {_fmt_price(mkt['price_usd'])}")
+            bits.append(f"mcap {_fmt_usd(mkt['market_cap_usd'])}")
+            if mkt.get("fdv_usd"):
+                bits.append(f"FDV {_fmt_usd(mkt['fdv_usd'])}")
+            chg = mkt.get("price_change_7d_pct")
+            if chg is not None:
+                bits.append(f"{chg:+.1f}% 7d")
+            if mkt.get("circulating_supply") and mkt.get("total_supply"):
+                pct_circ = mkt["circulating_supply"] / mkt["total_supply"] * 100
+                sym = mkt.get("symbol") or ""
+                bits.append(
+                    f"{_fmt_num(mkt['circulating_supply'])}/{_fmt_num(mkt['total_supply'])} "
+                    f"{sym} circulating ({pct_circ:.0f}%)"
+                )
+            lines.append(f" - {name} token: " + ", ".join(bits))
+    except Exception:
+        log.debug("entity brief: market data fetch failed for %r", name, exc_info=True)
     if not lines:
         return ""
     return (
-        "VERIFIED DATABASE FACTS (live DeFiLlama TVL + Snapshot governance — authoritative; "
-        "do NOT alter these numbers or invent others):\n" + "\n".join(lines)
+        "VERIFIED DATABASE FACTS (live DeFiLlama TVL + CoinGecko market data + Snapshot "
+        "governance — authoritative; do NOT alter these numbers or invent others):\n"
+        + "\n".join(lines)
     )
 
 
@@ -163,20 +292,37 @@ def _generate_brief(entity: dict, today_bullets: list[dict], digest_date: date_t
     """Generate brief HTML for one entity. Returns enriched entity dict or None on failure."""
     name = entity["name"]
     try:
-        pattern = re.compile(r"\b" + re.escape(name) + r"\b", re.IGNORECASE)
+        # One anchor pattern gates ALL text matched to this entity (today's bullets,
+        # history, semantic-search results) — name + distinctive aliases, with the
+        # ambiguous-brand case rule. Fallback to the plain name pattern keeps the
+        # brief building if the entity row carries no usable terms.
+        anchor = _entity_anchor(entity) or re.compile(
+            r"\b" + re.escape(name) + r"\b", re.IGNORECASE)
 
         # Filter today's bullets for this entity
         entity_today = [
             {"date": str(digest_date), **b}
             for b in today_bullets
-            if pattern.search(b.get("title", "") + " " + b.get("body", ""))
+            if anchor.search(b.get("title", "") + " " + b.get("body", ""))
         ]
 
         # Historical bullets (last 14 days, excluding today)
-        hist_bullets = _get_historical_bullets_for_entity(name, days=14)
+        hist_bullets = _get_historical_bullets_for_entity(anchor, days=14)
 
         all_bullets = entity_today + hist_bullets
-        feed_items  = db.search_feed(name, topk=10, days=14)
+
+        # Semantic search is ANN — it ALWAYS returns topk, so without the anchor gate
+        # topically-adjacent items that never mention the entity would enter the prompt
+        # as "RECENT FEED ITEMS" and their events get attributed to this entity
+        # (the same lesson as digest._related_coverage). Fail-open to the unfiltered
+        # list: a degraded gate must not kill the brief.
+        feed_items = list(db.search_feed(name, topk=10, days=14))
+        try:
+            feed_items = [r for r in feed_items
+                          if anchor.search(util.TAG_RE.sub(" ", str(r.get("content") or "")))]
+        except Exception:
+            log.warning("entity brief: feed-item anchor gate failed for %r — using "
+                        "unfiltered search results", name, exc_info=True)
 
         if not all_bullets and not feed_items:
             log.debug("entity brief: no data for %r, skipping", name)
@@ -186,8 +332,17 @@ def _generate_brief(entity: dict, today_bullets: list[dict], digest_date: date_t
         user_prompt = prompts.build_entity_brief_user(name, all_bullets, list(feed_items), db_facts)
         # 900 tokens (was 600): a reasoning fallback model needs room to think AND still
         # emit the brief; with 600 it burned the budget reasoning and produced no bullets.
-        content, model = llm.complete(prompts.ENTITY_BRIEF_SYSTEM, user_prompt, max_tokens=900, temperature=0.4)
+        # skip_reasoning: reasoning models are excluded from this path outright since the
+        # 2026-07-07 template-echo incident — _BRIEF_LEAK_RE is the backstop, not the plan.
+        content, model = llm.complete(prompts.ENTITY_BRIEF_SYSTEM, user_prompt, max_tokens=900,
+                                      temperature=0.4, skip_reasoning=True)
         brief = _clean_brief(content)
+        # Deterministic backstop: unwrap any link that isn't a real source URL from the
+        # context (planted link-swap injection or invented canonical URL) — same guard the
+        # digest applies. Allowed = the SOURCE links actually fed into the prompt.
+        allowed_links = ({b.get("link") for b in all_bullets if b.get("link")}
+                         | {r.get("link") for r in feed_items if r.get("link")})
+        brief = util.strip_foreign_hrefs(brief, allowed_links)
         if "•" not in brief:  # no bullets survived → reasoning-only / empty: don't cache garbage
             log.warning("entity brief: no usable bullets for %r (model=%s, likely reasoning leak) — skipping",
                         name, model)
@@ -204,7 +359,7 @@ def update_entity_briefs_from_digest(digest_date: date_t, bullets_html: str) -> 
     Runs up to 5 parallel LLM calls. Failures per-entity are logged and skipped.
     Returns count of successfully stored briefs.
     """
-    plain_text   = _TAG_RE.sub(" ", bullets_html)
+    plain_text   = util.TAG_RE.sub(" ", bullets_html)
     entities     = _find_entities_in_text(plain_text)
     today_bullets = _parse_bullets(bullets_html)
 
@@ -234,6 +389,76 @@ def update_entity_briefs_from_digest(digest_date: date_t, bullets_html: str) -> 
     return stored
 
 
+def refresh_stale_briefs(hours: int = 3, min_new_mentions: int = 2, max_refresh: int = 15) -> int:
+    """Incremental intra-day top-up: refresh briefs for entities with MEANINGFUL new
+    coverage since their last brief, without waiting for the next daily digest.
+
+    Self-limiting by design (a quiet news cycle costs nothing):
+      - Only entities that ALREADY have a brief are refreshed — discovering brand-new
+        entities stays the daily digest's job (`update_entity_briefs_from_digest`) /
+        `backfill`, so this never grows the entity roster or re-runs full extraction.
+      - Only entities whose brief predates this window (`updated_at` older than
+        `hours` ago) are considered — an entity refreshed earlier this cycle is skipped.
+      - Requires >= `min_new_mentions` distinct new feed items anchored to the entity
+        in the window — a single passing mention isn't "meaningful" new coverage.
+      - Capped at `max_refresh` LLM calls per run regardless of how many qualify, so a
+        busy news cycle has a predictable cost ceiling.
+    """
+    recent = db.get_recent_feed_items(hours=hours, limit=800)
+    if not recent:
+        return 0
+
+    slugs = entities.detect_entities_in_items([{"content": r.get("content", "")} for r in recent])
+    if not slugs:
+        return 0
+
+    briefed = {r["entity_name"].lower(): r["updated_at"]
+               for r in db._fetchall(
+                   "SELECT entity_name, updated_at FROM entity_intel_brief", dict_rows=True)}
+    if not briefed:
+        return 0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    plain_recent = [(util.TAG_RE.sub(" ", r.get("content") or "")) for r in recent]
+
+    candidates = []
+    for ent in db.get_entities_by_slugs(slugs):
+        last_update = briefed.get(ent["name"].lower())
+        if last_update is None or last_update > cutoff:
+            continue  # no existing brief (not this job's job) or already fresh
+        anchor = _entity_anchor(ent)
+        if not anchor:
+            continue
+        new_count = sum(1 for t in plain_recent if anchor.search(t))
+        if new_count >= min_new_mentions:
+            candidates.append(ent)
+
+    if not candidates:
+        return 0
+    candidates = candidates[:max_refresh]
+
+    log.info("entity briefs: %d entities qualify for incremental refresh (of %d mentioned)",
+              len(candidates), len(slugs))
+
+    today = datetime.now(timezone.utc).date()
+    stored = 0
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(_generate_brief, e, [], today): e for e in candidates}
+        for fut in as_completed(futures):
+            e = futures[fut]
+            try:
+                result = fut.result()
+                if result:
+                    db.upsert_entity_intel_brief(
+                        result["name"], result["brief_html"], result["model_used"], today)
+                    stored += 1
+            except Exception:
+                log.warning("entity brief: incremental refresh failed for %r", e.get("name"), exc_info=True)
+
+    log.info("entity briefs: incremental refresh stored %d/%d briefs", stored, len(candidates))
+    return stored
+
+
 def backfill(days: int = 30) -> int:
     """Generate a brief for every entity seen across the last N days of digests.
 
@@ -253,7 +478,7 @@ def backfill(days: int = 30) -> int:
         if not content:
             continue
         dd = d if isinstance(d, _date) else _date.fromisoformat(str(d)[:10])
-        plain = _TAG_RE.sub(" ", content)
+        plain = util.TAG_RE.sub(" ", content)
         today_bullets = _parse_bullets(content)
         pending = [e for e in _find_entities_in_text(plain) if e["slug"] not in seen]
         if not pending:
@@ -276,6 +501,25 @@ def backfill(days: int = 30) -> int:
     return stored
 
 
+def renormalize_stored_briefs() -> int:
+    """Re-apply `_normalize_brief_format` to every stored brief in place — a pure string
+    transform, no LLM calls. Run once after deploying the normalizer to fix the existing
+    backlog (measured 2026-07-05: effectively 100% of stored briefs pre-date the fix and
+    render as empty in the web SearchPanel). Only writes rows that actually change."""
+    rows = db._fetchall(
+        "SELECT entity_name, brief_html, model_used, digest_date FROM entity_intel_brief",
+        dict_rows=True,
+    )
+    updated = 0
+    for r in rows:
+        fixed = _normalize_brief_format(r["brief_html"])
+        if fixed != r["brief_html"]:
+            db.upsert_entity_intel_brief(r["entity_name"], fixed, r["model_used"], r["digest_date"])
+            updated += 1
+    log.info("entity briefs: renormalized %d / %d stored briefs", updated, len(rows))
+    return updated
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -284,9 +528,13 @@ if __name__ == "__main__":
     ap.add_argument("--backfill", action="store_true",
                     help="regenerate briefs for every entity across recent digests")
     ap.add_argument("--days", type=int, default=30, help="lookback window for --backfill")
+    ap.add_argument("--renormalize", action="store_true",
+                    help="re-apply format normalization to all stored briefs in place (no LLM calls)")
     args = ap.parse_args()
 
-    if args.backfill:
+    if args.renormalize:
+        renormalize_stored_briefs()
+    elif args.backfill:
         backfill(days=args.days)
     else:
-        ap.error("nothing to do: pass --backfill (post-digest generation runs automatically)")
+        ap.error("nothing to do: pass --backfill or --renormalize")

@@ -55,6 +55,23 @@ def get_digest(d: "date_t") -> "dict | None":
     return {"date": row[0], "content": row[1], "model_used": row[2], "trigger": row[3]}
 
 
+def get_digest_attempts(d: "date_t") -> list[dict]:
+    """All crypto_digest rows for a date (successes AND error rows), newest first.
+
+    Drives the T17 same-day retry decision (app.digest.should_retry_digest): it needs
+    to see failed attempts too, so unlike get_digest() it does not filter error IS NULL.
+    `has_content` guards the degenerate error-NULL-but-empty case (a bare header body)."""
+    rows = _fetchall(
+        """SELECT created_at, trigger, error, (length(coalesce(content, '')) > 40) AS has_content
+           FROM crypto_digest WHERE date = %s ORDER BY created_at DESC""",
+        (d,),
+    )
+    return [
+        {"created_at": r[0], "trigger": r[1], "error": r[2], "has_content": bool(r[3])}
+        for r in rows
+    ]
+
+
 def get_recent_digests(limit: int = 15) -> list[tuple]:
     return _fetchall(
         """SELECT created_at, date, model_used, trigger, duration_ms, error

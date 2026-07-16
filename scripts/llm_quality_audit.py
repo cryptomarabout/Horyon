@@ -20,8 +20,10 @@ import sys
 from datetime import datetime, timezone
 
 # ── helpers ──────────────────────────────────────────────────────────────────
-URL_RE = re.compile(r'https?://[^\s"<>)]+')
-HREF_RE = re.compile(r'href="([^"]+)"')
+# URL identity primitives live in app/eval_harness.py (the scored T10 harness) —
+# ONE definition of "this cited link is the same source" for both tools.
+from app.eval_harness import URL_RE, HREF_RE, url_key as _url_key, url_keys as _url_keys
+
 # money like $62M, $1.2B, $500,000 ; percents like +12%, -3.4% ; versions like v3, V4
 MONEY_RE = re.compile(r'\$\s?\d[\d,.]*\s?(?:[bmkt]|billion|million|thousand|trillion)?\b', re.I)
 PCT_RE = re.compile(r'[-+]?\d[\d.]*\s?%')
@@ -30,20 +32,6 @@ VER_RE = re.compile(r'\bv\d+(?:\.\d+)?\b', re.I)
 
 def _norm_num(tok: str) -> str:
     return re.sub(r'[\s,]', '', tok).lower().rstrip('.')
-
-
-def _url_key(u: str) -> str:
-    """Host/fragment-agnostic identity for a source link, so a tweet cited as
-    x.com/u/status/123 matches the source stored as x.com/u/status/123#m (the model
-    routinely drops/keeps the #m fragment — harmless, same tweet)."""
-    m = re.search(r'status/(\d+)', u)
-    if m:
-        return "tw:" + m.group(1)
-    return u.split("#")[0].rstrip("/").lower()
-
-
-def _url_keys(text: str) -> set:
-    return {_url_key(u) for u in URL_RE.findall(text)}
 
 
 def hr(title: str) -> None:

@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 
 from flask import Flask, Response, jsonify, render_template_string, request
 
-from . import config, db, embeddings
+from . import config, db, embeddings, util
 from .feeds import SOURCES
 
 log = logging.getLogger(__name__)
@@ -91,9 +91,7 @@ def _fmt(dt, fmt: str = "%Y-%m-%d %H:%M") -> str:
     if not dt:
         return "—"
     if isinstance(dt, datetime):
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(UTC2).strftime(fmt)
+        return util.as_utc(dt).astimezone(UTC2).strftime(fmt)
     return str(dt)[:16]
 
 
@@ -382,6 +380,98 @@ def _kaiko() -> dict:
     return out
 
 
+def _pipeline_health() -> dict:
+    """Surface silent degradation (T9): the states that historically rotted for
+    days without anyone noticing — failed source fetches, failed/missing audio
+    variants, thread backlog, frozen governance states, unembedded items, and
+    digest_audio storage growth (retention watch). Graceful — never raises."""
+    out: dict = {}
+    try:
+        with db._conn() as conn, conn.cursor() as cur:
+            # (1) Items still unembedded after 2+ ingest cycles. Fresh rows are
+            # legitimately NULL until the next embed pass — only overdue ones are red.
+            out["emb_overdue"] = _q1(cur, """
+                SELECT count(*) FROM feed_items
+                 WHERE embedding IS NULL
+                   AND ingested_at < now() - interval '45 minutes'""")[0]
+
+            # (2) Sources failing hard. Historically 2,513 failed fetches sat log-only;
+            # >10 consecutive failures usually means the URL moved, not a blip.
+            cur.execute("""
+                SELECT url, consecutive_failures, last_status, left(last_error,100)
+                  FROM source_health
+                 WHERE consecutive_failures > 10
+                 ORDER BY consecutive_failures DESC""")
+            out["failing_sources"] = [
+                {"display": _source_display(r[0]), "url": r[0], "failures": r[1],
+                 "status": r[2], "error": (r[3] or "")}
+                for r in cur.fetchall()
+            ]
+
+            # (3a) Audio rows not 'ready' in the last 14 days. failed=red;
+            # blocked is the fail-closed modality gate doing its job (amber);
+            # pending is only suspicious for a past date.
+            cur.execute("""
+                SELECT digest_date, variant, status
+                  FROM digest_audio
+                 WHERE digest_date >= current_date - 14 AND status <> 'ready'
+                 ORDER BY digest_date DESC, variant""")
+            out["audio_bad"] = [
+                {"date": str(r[0]), "variant": r[1], "status": r[2]}
+                for r in cur.fetchall()
+            ]
+            # Days (excluding today — it may still be rendering) with <3 ready variants.
+            cur.execute("""
+                SELECT d.date::text, COALESCE(sum((da.status='ready')::int),0) AS ready
+                  FROM (SELECT generate_series(current_date-7, current_date-1,
+                                               interval '1 day')::date AS date) d
+                  LEFT JOIN digest_audio da ON da.digest_date = d.date
+                 GROUP BY d.date
+                HAVING COALESCE(sum((da.status='ready')::int),0) < 3
+                 ORDER BY d.date DESC""")
+            out["audio_incomplete_days"] = [
+                {"date": r[0], "ready": r[1]} for r in cur.fetchall()
+            ]
+
+            # (3b) Thread backlog. 'pending' is NOT a failure while posting is
+            # unoperated (decision D1) — neutral count; 'blocked' is the modality gate.
+            cur.execute("SELECT status, count(*) FROM digest_threads GROUP BY status")
+            tc = dict(cur.fetchall())
+            out["threads"] = {"pending": tc.get("pending", 0),
+                              "posted": tc.get("posted", 0),
+                              "blocked": tc.get("blocked", 0)}
+
+            # (4) Governance sanity: an 'active' proposal past its end_ts means the
+            # fetcher is frozen (state never advanced to closed).
+            out["gov_frozen"] = _q1(cur, """
+                SELECT count(*) FROM governance_proposals
+                 WHERE state = 'active' AND end_ts < now()""")[0]
+
+            # (6) scored LLM eval runs (weekly cron + manual — app/eval_harness.py)
+            try:
+                from .db import evals as _evals
+                out["eval_batches"] = [
+                    {**b, "run_at": _fmt(b["run_at"])} for b in _evals.get_eval_batches(8)
+                ]
+            except Exception:
+                out["eval_batches"] = []
+
+            # (5) digest_audio stored bytes — watch the retention cron working.
+            total_bytes, oldest = _q1(cur, """
+                SELECT COALESCE(sum(byte_size),0), min(digest_date)
+                  FROM digest_audio WHERE audio IS NOT NULL""")
+            out["audio_mb"] = round((total_bytes or 0) / 1e6)
+            out["audio_oldest"] = str(oldest) if oldest else "—"
+            retention = config.AUDIO_RETENTION_DAYS or 0
+            out["audio_retention_ok"] = True
+            if retention and oldest:
+                age = (datetime.now(timezone.utc).date() - oldest).days
+                out["audio_retention_ok"] = age <= retention + 2
+    except Exception as exc:
+        log.debug("pipeline health stats failed: %s", exc)
+    return out
+
+
 def gather() -> dict:
     with db._conn() as conn, conn.cursor() as cur:
         feed_total, feed_emb, feed_null, feed_stale, last_ing = _q1(cur, """
@@ -545,6 +635,7 @@ def gather() -> dict:
         "recent_analyses": recent_analyses,
         "tvl": tvl_rows,
         "kaiko": kaiko,
+        "pipeline": _pipeline_health(),
         "db_switch": db_switch,
     }
 
@@ -611,6 +702,61 @@ CONTENT = """
  <div class="card"><div class="n small">{{ feed.last_ingested }}</div><div class="l">last ingest (UTC+2)</div></div>
  {% for t,n in feed.by_type %}<div class="card"><div class="n">{{ n }}</div><div class="l">{{ t }}</div></div>{% endfor %}
 </div>
+
+<h2>Pipeline health</h2>
+{% if pipeline %}
+<div class="grid">
+ <div class="card"><div class="n {{ 'bad' if pipeline.emb_overdue else 'ok' }}">{{ pipeline.emb_overdue }}</div><div class="l">unembedded &gt;45min</div></div>
+ <div class="card"><div class="n {{ 'bad' if pipeline.failing_sources else 'ok' }}">{{ pipeline.failing_sources|length }}</div><div class="l">sources failing &gt;10×</div></div>
+ <div class="card"><div class="n {{ 'bad' if pipeline.audio_bad or pipeline.audio_incomplete_days else 'ok' }}">{{ pipeline.audio_bad|length }}</div><div class="l">audio not-ready 14d{% if pipeline.audio_incomplete_days %} <span class="bad">({{ pipeline.audio_incomplete_days|length }} incomplete day{{ 's' if pipeline.audio_incomplete_days|length != 1 }})</span>{% endif %}</div></div>
+ <div class="card"><div class="n">{{ pipeline.threads.pending }}<span class="muted" style="font-size:13px"> pending</span>{% if pipeline.threads.blocked %} <span class="bad" style="font-size:15px">{{ pipeline.threads.blocked }} blocked</span>{% endif %}</div><div class="l">threads ({{ pipeline.threads.posted }} posted — pending ≠ failure, posting unoperated)</div></div>
+ <div class="card"><div class="n {{ 'bad' if pipeline.gov_frozen else 'ok' }}">{{ pipeline.gov_frozen }}</div><div class="l">governance frozen-active</div></div>
+ <div class="card"><div class="n {{ '' if pipeline.audio_retention_ok else 'bad' }}">{{ pipeline.audio_mb }} MB</div><div class="l">audio bytes (oldest {{ pipeline.audio_oldest }}{% if not pipeline.audio_retention_ok %} — <span class="bad">retention stalled</span>{% endif %})</div></div>
+</div>
+
+{% if pipeline.failing_sources %}
+<h3 class="sub bad">Failing sources — check for a URL move first (feeds.py), drop only if the source rotted</h3>
+<table>
+<tr><th>Source</th><th>consecutive fails</th><th>HTTP</th><th>last error</th></tr>
+{% for s in pipeline.failing_sources %}<tr class="row-err">
+ <td class="mono small">{{ s.display }}</td>
+ <td class="bad">{{ s.failures }}</td>
+ <td>{{ s.status if s.status is not none else '—' }}</td>
+ <td class="muted small">{{ s.error }}</td>
+</tr>{% endfor %}
+</table>
+{% endif %}
+
+{% if pipeline.audio_bad %}
+<h3 class="sub">Audio variants not ready (14d) <span class="muted small">— failed heals same-day off the 20-min cycle; blocked = modality gate (deliberate)</span></h3>
+<table>
+<tr><th>Date</th><th>Variant</th><th>Status</th></tr>
+{% for a in pipeline.audio_bad %}<tr class="{{ 'row-err' if a.status == 'failed' else '' }}">
+ <td class="muted mono small">{{ a.date }}</td>
+ <td>{{ a.variant }}</td>
+ <td class="{{ 'bad' if a.status == 'failed' else 'muted' }}">{{ a.status }}</td>
+</tr>{% endfor %}
+</table>
+{% endif %}
+
+<h3 class="sub">LLM grounding eval <span class="muted small">— scored fixture runs (weekly cron Sun 20:10 UTC + manual; app/eval_harness.py)</span></h3>
+{% if pipeline.eval_batches %}
+<table>
+<tr><th>Run (UTC+2)</th><th>Kind</th><th>Cases</th><th>Checks ok/fail</th><th>Failing case(s)</th></tr>
+{% for e in pipeline.eval_batches %}<tr class="{{ 'row-err' if e.failed_cases else '' }}">
+ <td class="muted mono small">{{ e.run_at }}</td>
+ <td class="small">{{ e.run_kind }}</td>
+ <td>{{ e.cases }}</td>
+ <td><span class="ok">{{ e.passed }}</span> / <span class="{{ 'bad' if e.failed else 'muted' }}">{{ e.failed }}</span></td>
+ <td class="{{ 'bad small' if e.failing else 'muted small' }}">{{ e.failing|join(', ') if e.failing else '—' }}</td>
+</tr>{% endfor %}
+</table>
+{% else %}
+<p class="muted">No eval runs recorded yet — <code>docker exec horyon-bot python3 -m app.eval_harness</code>.</p>
+{% endif %}
+{% else %}
+<p class="muted">Pipeline health unavailable (query failed — check logs).</p>
+{% endif %}
 
 <h2>Recent ingest runs</h2>
 <table>

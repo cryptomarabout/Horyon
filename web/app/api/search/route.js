@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { pool, getEntityIntelBrief, AMBIGUOUS_TERMS, CRYPTO_CTX } from "../../../lib/db";
+import { pool, getEntityIntelBrief, getEntityFacts, AMBIGUOUS_TERMS, CRYPTO_CTX } from "../../../lib/db";
 import { escapeHtml, safeHref } from "../../../lib/sanitize.mjs";
+import { fmtDayAgo } from "../../../lib/format";
 
 // PUBLIC SITE — ZERO PAID-LLM EGRESS, ZERO PER-REQUEST EXTERNAL CALL.
 // This route used to run an 8-step ReAct agent (free-text) + a one-shot synth call
@@ -79,7 +80,9 @@ function formatFeedBullets(rows, kw) {
     const head = (r.creator || r.source_type || "feed").trim();
     const href = safeHref(r.link);
     const link = href ? ` <a href="${href}">🔗</a>` : "";
-    bullets.push(`• <b>${escapeHtml(head)}</b> — ${escapeHtml(text.slice(0, 180))}${link}`);
+    const ago = r.pub_date ? fmtDayAgo(r.pub_date.toISOString()) : null;
+    const when = ago ? ` · ${escapeHtml(ago)}` : "";
+    bullets.push(`• <b>${escapeHtml(head)}</b> — ${escapeHtml(text.slice(0, 180))}${when}${link}`);
     if (bullets.length >= 7) break;
   }
   if (!bullets.length) {
@@ -124,8 +127,9 @@ export async function POST(req) {
       if (mode === "synth") {
         const brief = await getEntityIntelBrief(kw);
         if (brief?.brief_html) {
+          const facts = await getEntityFacts(brief.slug).catch(() => null);
           return NextResponse.json({
-            content: brief.brief_html, sources: 0, cached: true, asOf: brief.digest_date,
+            content: brief.brief_html, sources: 0, cached: true, asOf: brief.digest_date, facts,
           });
         }
       }
@@ -144,7 +148,10 @@ export async function POST(req) {
   try {
     const brief = await getEntityIntelBrief(kw);
     if (brief?.brief_html) {
-      return NextResponse.json({ content: brief.brief_html, sources: 0, cached: true, asOf: brief.digest_date });
+      const facts = await getEntityFacts(brief.slug).catch(() => null);
+      return NextResponse.json({
+        content: brief.brief_html, sources: 0, cached: true, asOf: brief.digest_date, facts,
+      });
     }
     return NextResponse.json({ content: await feedAnswer(kw), sources: 0 });
   } catch (e) {

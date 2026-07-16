@@ -15,6 +15,11 @@ from .telegram_html import split_message
 
 log = logging.getLogger(__name__)
 _scheduler: AsyncIOScheduler | None = None
+_app: Application | None = None
+# Serializes every digest build (07:00 cron + T17 same-day retries) so a retry can
+# never overlap a still-running cron build. asyncio is single-threaded; run_digest
+# itself runs via to_thread, so holding this across the to_thread call is the guard.
+_digest_lock = asyncio.Lock()
 
 
 async def _ingest_job() -> None:
@@ -41,6 +46,20 @@ async def _ingest_job() -> None:
                 )
     except Exception:
         log.warning("ingest: bullet analysis safety-net check failed (non-fatal)", exc_info=True)
+
+    # Same-day digest self-heal (T17): if the 07:00 build failed and left the day empty,
+    # rerun it later in the day off this 20-min cycle. Best-effort, never fatal.
+    try:
+        await _maybe_retry_digest()
+    except Exception:
+        log.warning("ingest: digest self-heal check failed (non-fatal)", exc_info=True)
+
+    # Same-day AUDIO self-heal: if the 07:00 post-digest left an audio variant 'failed'/missing
+    # (usually the heavy explainer), re-render just those later in the day. Best-effort, non-fatal.
+    try:
+        await _maybe_heal_audio()
+    except Exception:
+        log.warning("ingest: audio self-heal check failed (non-fatal)", exc_info=True)
 
 
 async def _send_audio_briefing(app: Application) -> None:
@@ -77,28 +96,109 @@ async def _send_audio_briefing(app: Application) -> None:
         log.warning("audio briefing send skipped (non-fatal)", exc_info=True)
 
 
+async def _send_digest_message(app: Application, html: str, *, late: bool = False) -> None:
+    """Send a built digest to every allowed chat. `late=True` prepends a recovery note
+    (the T17 retry path sends its own message — the Telegram send lives in the cron, not
+    in run_digest)."""
+    chunks = split_message(html) or ["(empty digest)"]
+    if late:
+        chunks[0] = ("🕐 <i>(late digest — recovered after an earlier failure this "
+                     "morning)</i>\n\n") + chunks[0]
+    for chat_id in config.ALLOWED_CHAT_IDS:
+        try:
+            for chunk in chunks:
+                await app.bot.send_message(
+                    chat_id, chunk,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+        except TelegramError:
+            log.exception("failed to send daily digest to chat_id=%s", chat_id)
+
+
+async def _maybe_retry_digest() -> None:
+    """T17 same-day digest self-heal, driven off the 20-min ingest cycle. If the 07:00
+    build failed and left the day empty, rerun it (≥07:20 UTC, ≤3 attempts/day, ≥60 min
+    apart — decision in digest.should_retry_digest) and late-send it to Telegram. Never
+    overlaps a running digest (shared _digest_lock). Best-effort; caller swallows errors."""
+    from . import digest, db as _db
+    from datetime import date as _date
+
+    if _app is None or _digest_lock.locked():
+        return  # a digest (cron or a prior retry) is mid-build — don't overlap
+    today = _date.today()
+    now = datetime.now(timezone.utc)
+    attempts = await asyncio.to_thread(lambda: _db.get_digest_attempts(today))
+    if not digest.should_retry_digest(attempts, now):
+        return
+
+    n = sum(1 for a in attempts if a.get("trigger") == "retry") + 1
+    log.warning("digest self-heal: today's digest missing/failed — running retry #%d", n)
+    async with _digest_lock:
+        try:
+            html = await asyncio.to_thread(lambda: digest.run_digest(trigger="retry"))
+        except Exception:
+            log.exception("digest self-heal: retry #%d failed", n)
+            return
+    log.info("digest self-heal: retry #%d succeeded — late-sending to Telegram", n)
+    await _send_digest_message(_app, html, late=True)
+    await _send_audio_briefing(_app)
+
+
+async def _maybe_heal_audio() -> None:
+    """Same-day AUDIO self-heal, driven off the 20-min ingest cycle. The 07:00 post-digest
+    builds all three length variants at once, but a transient LLM outage at that minute can
+    leave one 'failed' with an empty script — most often the heavy explainer (2026-07-08..10,
+    when the site showed only the standard "Briefing"). This re-renders ONLY the missing/failed
+    variants later in the day, when the models are reachable again. Decision is pure
+    (briefing.variants_needing_heal); this just effects it. Never overlaps a digest build
+    (shared _digest_lock). Best-effort; caller swallows errors."""
+    from . import db as _db, briefing
+    from datetime import date as _date
+
+    if not config.AUDIO_BRIEFING_ENABLED or _app is None or _digest_lock.locked():
+        return
+    today = _date.today()
+    now = datetime.now(timezone.utc)
+    bullets = await asyncio.to_thread(lambda: _db.get_bullet_analyses(today))
+    rows = await asyncio.to_thread(lambda: _db.get_audio_variant_status(today))
+    need = briefing.variants_needing_heal(rows, bool(bullets), now)
+    if not need:
+        return
+
+    log.warning("audio self-heal: %s missing/failed variant(s) %s — re-rendering",
+                today, ", ".join(need))
+    async with _digest_lock:  # keep the T17 digest retry from overlapping this build
+        try:
+            res = await asyncio.to_thread(
+                lambda: briefing.build_all_variants_for_date(today, variants=need))
+        except Exception:
+            log.exception("audio self-heal: re-render failed for %s", today)
+            return
+    healed = [v for v in need if (res.get(v) or {}).get("status") == "ready"]
+    log.info("audio self-heal: %s — rendered %s", today,
+             ", ".join(f"{v}={(res.get(v) or {}).get('status', 'skip')}" for v in need))
+    # Only the 'standard' show is sent to Telegram; if it was the one that healed (rare — the
+    # explainer/short heal silently, the web picks them up), late-send it. Guarded so an
+    # explainer-only heal never resends the standard show that already went out this morning.
+    if "standard" in healed:
+        await _send_audio_briefing(_app)
+
+
 async def _post_init(app: Application) -> None:
-    global _scheduler
+    global _scheduler, _app
+    _app = app
 
     async def _daily_digest_cron() -> None:
         from . import digest, weekly as weekly_mod  # local imports avoid circular at startup
         log.info("daily digest cron starting")
-        try:
-            html = await asyncio.to_thread(lambda: digest.run_digest(trigger="cron"))
-        except Exception:
-            log.exception("daily digest generation failed")
-            return
-        chunks = split_message(html) or ["(empty digest)"]
-        for chat_id in config.ALLOWED_CHAT_IDS:
+        async with _digest_lock:  # keep the T17 retry from overlapping this build
             try:
-                for chunk in chunks:
-                    await app.bot.send_message(
-                        chat_id, chunk,
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                    )
-            except TelegramError:
-                log.exception("failed to send daily digest to chat_id=%s", chat_id)
+                html = await asyncio.to_thread(lambda: digest.run_digest(trigger="cron"))
+            except Exception:
+                log.exception("daily digest generation failed")
+                return
+        await _send_digest_message(app, html)
 
         # Daily audio briefing — generated best-effort in the post-digest orchestration above, so
         # it's already in the DB by now. Sent as a SEPARATE message right after the text so a
@@ -151,6 +251,27 @@ async def _post_init(app: Application) -> None:
         coalesce=True,
     )
 
+    async def _entity_hygiene_cron() -> None:
+        """Nightly self-heal of entity_memory (strip bad aliases, merge dupes, dealias
+        piggybacks, purge zero-footprint junk + block re-creation). Replaces the manual
+        daily audit loop; runs before the 07:00 digest so it sees a clean entity table."""
+        from . import entity_hygiene
+        try:
+            stats = await asyncio.to_thread(entity_hygiene.run)
+            log.info("entity hygiene cron: %s", stats)
+        except Exception:
+            log.exception("entity hygiene cron failed")
+
+    _scheduler.add_job(
+        _entity_hygiene_cron,
+        "cron",
+        hour=5,
+        minute=20,  # 05:20 UTC — well before the daily digest
+        id="entity_hygiene",
+        max_instances=1,
+        coalesce=True,
+    )
+
     async def _tvl_cron() -> None:
         from . import defillama
         try:
@@ -187,6 +308,24 @@ async def _post_init(app: Application) -> None:
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=60),
     )
 
+    async def _market_data_cron() -> None:
+        from . import defillama
+        try:
+            n = await asyncio.to_thread(defillama.fetch_and_store_market_data)
+            log.info("market data cron: stored %d coins", n)
+        except Exception:
+            log.exception("market data cron failed")
+
+    _scheduler.add_job(
+        _market_data_cron,
+        "interval",
+        hours=2,
+        id="market_data_poll",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=120),
+    )
+
     async def _snapshot_cron() -> None:
         from . import snapshot
         try:
@@ -221,6 +360,26 @@ async def _post_init(app: Application) -> None:
         max_instances=1,
         coalesce=True,
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=180),
+    )
+
+    async def _podcast_prediction_recheck_cron() -> None:
+        """Monthly deterministic prediction follow-through (T14): match open podcast
+        predictions against later digest coverage. Zero LLM — never blocks or costs a
+        call; a failure is logged and forgotten (inward surface, fail open)."""
+        from . import podcasts
+        try:
+            stats = await asyncio.to_thread(podcasts.recheck_predictions)
+            log.info("podcast prediction recheck cron: %s", stats)
+        except Exception:
+            log.exception("podcast prediction recheck cron failed")
+
+    _scheduler.add_job(
+        _podcast_prediction_recheck_cron,
+        "cron",
+        day=1, hour=6, minute=30,   # 1st of the month, quiet slot before the 07:00 digest
+        id="podcast_prediction_recheck",
+        max_instances=1,
+        coalesce=True,
     )
 
     async def _kaiko_cron() -> None:
@@ -266,6 +425,28 @@ async def _post_init(app: Application) -> None:
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=300),
     )
 
+    async def _entity_brief_refresh_cron() -> None:
+        """Top up entity intel briefs between digests so a fast-moving story doesn't sit
+        stale until tomorrow's 07:00 UTC digest. Self-limiting: only entities with
+        meaningful new coverage since their last brief are regenerated, capped per run —
+        see app.entity_brief.refresh_stale_briefs for the full cost-bound rationale."""
+        from . import entity_brief
+        try:
+            n = await asyncio.to_thread(entity_brief.refresh_stale_briefs)
+            log.info("entity brief refresh cron: refreshed %d briefs", n)
+        except Exception:
+            log.exception("entity brief refresh cron failed")
+
+    _scheduler.add_job(
+        _entity_brief_refresh_cron,
+        "interval",
+        hours=3,
+        id="entity_brief_refresh",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=360),
+    )
+
     async def _entity_graph_cron() -> None:
         """Rebuild the entity co-occurrence graph (entity_edges) read by the web map.
         Heavy scan over recent feed items → kept off the request path on a slow cron."""
@@ -306,6 +487,29 @@ async def _post_init(app: Application) -> None:
         coalesce=True,
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=720),
     )
+
+    async def _audio_retention_cron() -> None:
+        """Bound digest_audio growth: NULL audio bytes older than AUDIO_RETENTION_DAYS while
+        keeping scripts/chapters/metadata (294 MB — 44% of the DB — on 2026-07-07, growing
+        ~5 MB/day on a 29G disk). See db.null_old_audio for the full semantics."""
+        from . import db as _db
+        try:
+            n = await asyncio.to_thread(lambda: _db.null_old_audio(config.AUDIO_RETENTION_DAYS))
+            if n:
+                log.info("audio retention cron: nulled audio bytes on %d row(s)", n)
+        except Exception:
+            log.exception("audio retention cron failed")
+
+    if config.AUDIO_RETENTION_DAYS > 0:
+        _scheduler.add_job(
+            _audio_retention_cron,
+            "interval",
+            hours=24,
+            id="audio_retention",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=900),
+        )
 
     async def _weekly_tg_cron() -> None:
         """Monday only: send the report for the week that JUST ENDED (last Mon–Sun).
@@ -364,6 +568,34 @@ async def _post_init(app: Application) -> None:
         hour=7,
         minute=45,   # 07:45 UTC — after the daily digest (07:00) + its weekly refresh
         id="weekly_tg_send",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    async def _eval_harness_cron() -> None:
+        """Weekly scored LLM grounding + prompt-injection eval (app/eval_harness.py).
+        ~18 bounded LLM calls against fixed fixtures; results land in eval_runs and
+        surface on /monitor. A failure here means a model-chain/provider change
+        degraded grounding — catch it Sunday evening, not in Monday's digest."""
+        from . import eval_harness
+        try:
+            summary = await asyncio.to_thread(
+                lambda: eval_harness.run_all(run_kind="weekly-cron"))
+            if summary["failed_cases"]:
+                log.warning("eval harness: %d/%d case(s) FAILED — see /monitor + eval_runs",
+                            summary["failed_cases"], summary["cases"])
+            else:
+                log.info("eval harness: all %d case(s) passed", summary["cases"])
+        except Exception:
+            log.exception("eval harness cron failed")
+
+    _scheduler.add_job(
+        _eval_harness_cron,
+        "cron",
+        day_of_week="sun",
+        hour=20,
+        minute=10,   # quiet slot: no digest/audio work, hours from the Monday weekly
+        id="llm_eval_harness",
         max_instances=1,
         coalesce=True,
     )

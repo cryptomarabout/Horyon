@@ -6,7 +6,7 @@ from datetime import date as date_t
 
 from psycopg2.extras import RealDictCursor
 
-from ._core import _conn, _execute, _fetchall
+from ._core import _conn, _execute, _fetchall, _fetchone
 
 
 # --------------------------------------------------------------------------- #
@@ -56,6 +56,75 @@ CANONICAL_ENTITY_TYPES: dict[str, str] = {
 }
 
 
+# ── Entity review verdicts (decision memory) ─────────────────────────────────
+# The audit's review-only classes (collision-risk, generically-named junk) used to
+# re-flag the same entities on every run, and a junk entity deleted by hand was
+# re-created by the next LLM extraction cycle within days. entity_review stores the
+# human/purge verdict durably: 'block' → upsert_entity refuses to (re)create the slug;
+# 'keep' → the audit stops flagging it. Loaded per-call sets are tiny (dozens of rows).
+
+def get_entity_reviews() -> dict[str, str]:
+    """slug → verdict ('keep' | 'block'). Empty dict if the table doesn't exist yet."""
+    try:
+        return {slug: verdict for slug, verdict in _fetchall(
+            "SELECT slug, verdict FROM entity_review")}
+    except Exception:
+        return {}
+
+
+def set_entity_review(slug: str, verdict: str, reason: str = "") -> None:
+    """Record a durable keep/block verdict for a slug."""
+    if verdict not in ("keep", "block"):
+        raise ValueError(f"invalid verdict {verdict!r}")
+    _execute(
+        """INSERT INTO entity_review (slug, verdict, reason, decided_at)
+           VALUES (%s, %s, %s, now())
+           ON CONFLICT (slug) DO UPDATE SET
+               verdict = EXCLUDED.verdict, reason = EXCLUDED.reason, decided_at = now()""",
+        (slug, verdict, reason),
+    )
+
+
+def _is_blocked(slug: str) -> bool:
+    try:
+        row = _fetchall(
+            "SELECT 1 FROM entity_review WHERE slug = %s AND verdict = 'block'", (slug,))
+        return bool(row)
+    except Exception:
+        return False  # table missing on a fresh volume — never break ingest
+
+
+def prose_doc_count(term: str, cap: int = 60) -> "int | None":
+    """How many feed_items documents contain `term` as a word, capped at `cap`.
+
+    Returns None when the term is an English stopword ("would", "just", …) —
+    to_tsquery drops it, which is itself the strongest possible evidence the
+    term is ordinary prose. Uses the content_tsv GIN index; the LIMIT means a
+    very common word never triggers a full scan. Used by extraction to refuse
+    minting a NEW entity whose only identity is a common prose word."""
+    t = (term or "").strip()
+    if not t or not t.isalpha():
+        return 0
+    try:
+        row = _fetchone(
+            "SELECT count(*) FROM ("
+            "  SELECT 1 FROM feed_items"
+            "  WHERE content_tsv @@ plainto_tsquery('english', %s) LIMIT %s"
+            ") q",
+            (t, cap),
+        )
+        n = row[0] if row else 0
+        if n == 0:
+            # distinguish "rare term" from "stopword dropped by the parser"
+            empty = _fetchone(
+                "SELECT numnode(plainto_tsquery('english', %s)) = 0", (t,))
+            if empty and empty[0]:
+                return None
+        return int(n)
+    except Exception:
+        return 0  # fail open: never block ingest on a probe error
+
+
 def upsert_entity(slug: str, name: str, type_: str, aliases: list[str],
                   last_mentioned: "date_t | None" = None,
                   twitter_handle: str | None = None) -> None:
@@ -64,6 +133,10 @@ def upsert_entity(slug: str, name: str, type_: str, aliases: list[str],
     """
     # Token/governance standards are specifications, not entities.
     if _ERC_RE.match(name):
+        return
+    # Durably-blocked junk (entity_review verdict='block') must never be re-created
+    # by the next extraction cycle — the audit → delete → re-extract loop this kills.
+    if _is_blocked(slug):
         return
     # Pin curated entities to their human-verified type (survives re-extraction).
     type_ = CANONICAL_ENTITY_TYPES.get(slug, type_)
@@ -97,6 +170,8 @@ def upsert_entity_from_coingecko(slug: str, name: str, type_: str,
     Never overwrites type, name, mention_count, or twitter_handle of existing entries.
     """
     if _ERC_RE.match(name):
+        return
+    if _is_blocked(slug):
         return
     _execute(
         """
@@ -263,8 +338,10 @@ def seed_entities_from_protocols() -> int:
 
 
 def get_entity_mention_map() -> list[tuple]:
-    """Return (name, aliases, mention_count) for all entities — for entity-weight scoring."""
-    return _fetchall("SELECT name, aliases, mention_count FROM entity_memory")
+    """Return (name, aliases, type, mention_count) for all entities — for entity-weight
+    scoring (type lets scoring apply the shared ``matchable_term`` gate, which needs it
+    to keep short distinctive tickers like Sui/GHO while rejecting junk aliases)."""
+    return _fetchall("SELECT name, aliases, type, mention_count FROM entity_memory")
 
 
 def get_entities_for_briefing(min_mentions: int = 3) -> list[tuple]:

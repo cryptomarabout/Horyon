@@ -29,11 +29,23 @@ CMC_API_KEY = os.getenv("CMC_API_KEY", "")
 # --- OpenRouter (OpenAI-compatible chat completions) ---
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+# 2026-07-15: deepseek/deepseek-v4-flash:free and openai/gpt-oss-120b:free were DELISTED from
+# OpenRouter (404 mid-chain killed the explainer's fallbacks) — probe /models before re-adding
+# anything here. The free tier 429s heavily at peak; it is the LAST resort after NIM.
+# 2026-07-15 chain rebuild: llama-3.3-70b:free + qwen3-next-80b:free carry "Going away
+# July 19, 2026" banners on openrouter.ai (hermes-3-405b + tencent/hy3 too) — replaced ahead
+# of the cutoff with live-probed survivors (real bullet-analyst + briefing-script tests;
+# results in docs/conventions.md "LLM provider chain"). Order: probed prose quality first,
+# throughput second; gemma-4-31b never completed a probe (upstream 429s) but a 429 hop is
+# skipped instantly, so it rides mid-chain unvetted; the two nemotrons are REASONING_MODELS
+# (skip_reasoning prose paths never reach them).
 _DEFAULT_MODELS = ",".join([
-    "deepseek/deepseek-v4-flash:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "openai/gpt-oss-120b:free",
+    "google/gemma-4-26b-a4b-it:free",           # probed 2026-07-15: best dialogue fmt, 0 em dashes
+    "poolside/laguna-m.1:free",                 # probed 2026-07-15: 52.6 tok/s, clean fmt
+    "openai/gpt-oss-20b:free",                  # probed 2026-07-15: clean fmt, audio-friendly dates
+    "google/gemma-4-31b-it:free",               # UNVETTED — saturated upstream at probe time
+    "nvidia/nemotron-3-super-120b-a12b:free",   # reasoning — JSON tasks only
+    "nvidia/nemotron-3-ultra-550b-a55b:free",   # reasoning — JSON tasks only; probed: em-dash prone
 ])
 OPENROUTER_MODELS: list[str] = [
     m.strip() for m in os.getenv("OPENROUTER_MODELS", _DEFAULT_MODELS).split(",") if m.strip()
@@ -44,8 +56,10 @@ OPENROUTER_MODELS: list[str] = [
 NIM_API_KEY = os.getenv("NIM_API_KEY", "")
 NIM_BASE_URL = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 _DEFAULT_NIM_MODELS = ",".join([
-    "mistralai/mistral-medium-3.5-128b",   # primary — fast, reliable
-    "deepseek-ai/deepseek-v4-flash",       # fallback — heavy reasoning model, slow
+    "mistralai/mistral-medium-3.5-128b",         # primary — fast, reliable
+    "meta/llama-4-maverick-17b-128e-instruct",   # probed 2026-07-15: 87 tok/s, clean dialogue fmt
+    "mistralai/mistral-small-4-119b-2603",       # probed 2026-07-15: 50 tok/s, clean dialogue fmt
+    "deepseek-ai/deepseek-v4-flash",             # reasoning fallback — JSON tasks only (skip_reasoning)
 ])
 NIM_MODELS: list[str] = [
     m.strip() for m in os.getenv("NIM_MODELS", _DEFAULT_NIM_MODELS).split(",") if m.strip()
@@ -56,6 +70,24 @@ LLM_TIMEOUT_SEC = float(os.getenv("LLM_TIMEOUT_SEC", "60"))
 # Global cap on provider calls per rolling minute (0 = unlimited). Set to e.g. 20 for bulk
 # backfills to stay under free-tier rate limits; leave 0 for normal cron operation.
 LLM_MAX_CALLS_PER_MIN = int(os.getenv("LLM_MAX_CALLS_PER_MIN", "0"))
+# Models whose visible chain-of-thought ("reasoning") has repeatedly leaked past format guards
+# on LONG-FORM prose paths (audio-briefing scripts, entity briefs): they burn max_tokens on
+# <think> planning and have emitted the planning AS the answer (2026-07-07 entity-brief
+# incident; 2026-07-06 truncated standard show). Callers pass llm.complete(...,
+# skip_reasoning=True) to skip these; the filter is ignored if it would empty the chain, so
+# the multiple-models rule always holds. JSON-shaped tasks keep the full chain — <think>
+# strips cleanly there and the extra fallbacks matter more than the noise.
+# nemotron-3-ultra added 2026-07-15: reasoning-class + probed em-dash-prone on dialogue —
+# JSON tasks only. deepseek/deepseek-v4-flash:free is delisted but kept tagged in case it
+# returns; the NIM deepseek-ai/deepseek-v4-flash is live.
+REASONING_MODELS: frozenset = frozenset(
+    m.strip() for m in os.getenv(
+        "REASONING_MODELS",
+        "deepseek-ai/deepseek-v4-flash,deepseek/deepseek-v4-flash:free,"
+        "nvidia/nemotron-3-super-120b-a12b:free,"
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+    ).split(",") if m.strip()
+)
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -111,6 +143,13 @@ _DEFAULT_PODCAST_CHANNELS = ",".join([
     "@Bankless",
     "@TheRollupCo",
     "@empirepod",
+    # T14 expansion (2026-07-16) — crypto-native shows only (ingest has NO relevance
+    # gate). A handle that fails to resolve is skipped with a warning, never fatal;
+    # spot-check first-ingest entity extraction after they go live.
+    "@TheDefiantNews",   # The Defiant — DeFi-native reporting
+    "@Delphi_Digital",   # Delphi Digital — on-chain research
+    "@a16zcrypto",       # a16z crypto — protocol/infra deep dives
+    "@CoinBureau",       # Coin Bureau — markets + protocol explainers
 ])
 PODCAST_CHANNELS: list[str] = [
     h.strip() for h in os.getenv("PODCAST_CHANNELS", _DEFAULT_PODCAST_CHANNELS).split(",") if h.strip()
@@ -133,6 +172,12 @@ PODCAST_DIGEST_WINDOW_HOURS = _int("PODCAST_DIGEST_WINDOW_HOURS", 48)
 # Skip episodes published before this date (YYYY-MM-DD) — aligns podcast ingestion
 # with the rest of the intelligence window. Empty string = no cutoff.
 PODCAST_MIN_DATE = os.getenv("PODCAST_MIN_DATE", "2026-04-11").strip()
+# Prediction follow-through (T14): a monthly deterministic recheck matches each open
+# prediction's entities against LATER digest coverage. Only predictions at least
+# MIN_AGE days old are checked (give the call time to play out); one with no coverage
+# after STALE days is closed as 'stale' so the open set doesn't grow forever.
+PODCAST_PREDICTION_MIN_AGE_DAYS = _int("PODCAST_PREDICTION_MIN_AGE_DAYS", 14)
+PODCAST_PREDICTION_STALE_DAYS = _int("PODCAST_PREDICTION_STALE_DAYS", 90)
 # YouTube blocks unauthenticated transcript scraping from datacenter IPs (this host).
 # Provide ONE of these to unblock (no paid YouTube API needed):
 #   PODCAST_PROXY         — http(s) proxy URL routed through a non-datacenter IP
@@ -171,6 +216,16 @@ WEB_INTERNAL_URL = os.getenv("WEB_INTERNAL_URL", "http://web:3000").rstrip("/")
 # A ~5-min spoken digest rendered post-digest into digest_audio, delivered on the web player
 # + Telegram. Best-effort — never blocks the digest. Free TTS only.
 AUDIO_BRIEFING_ENABLED = os.getenv("AUDIO_BRIEFING_ENABLED", "1").strip().lower() not in ("0", "false", "no", "")
+# Retention for the rendered audio BYTES (bytea): rows older than this many days keep their
+# script/chapters/waveform/metadata but drop the ~2 MB/variant audio (digest_audio was 294 MB
+# — 44% of the DB — on 2026-07-07, growing ~5 MB/day on a 29G disk). 0 disables the daily
+# retention cron entirely (nothing is ever nulled).
+AUDIO_RETENTION_DAYS = _int("AUDIO_RETENTION_DAYS", 60)
+# Weekly report v2 (T12): compose the weekly per-section (deterministic movers/rotation +
+# 5 small, separately-retryable LLM sections) instead of one 1400-token completion. Falls
+# back to the monolithic single call if the sectioned assembly fails validation. Set to
+# 0/false to force the legacy single-call path.
+WEEKLY_SECTIONED = os.getenv("WEEKLY_SECTIONED", "1").strip().lower() not in ("0", "false", "no", "")
 # TTS engine behind the swappable tts.synthesize() interface:
 #   'edge'  — Microsoft neural voices via the free `edge-tts` package (default). Zero local
 #             compute (a cloud call — matters on this 2-core host), native MP3, good quality.
@@ -253,7 +308,15 @@ BRIEFING_EXPLAINER_MAX_BULLETS = _int("BRIEFING_EXPLAINER_MAX_BULLETS", 14)
 # come out at or below the briefing it is supposed to deepen.
 BRIEFING_MIN_WORD_RATIO = _float("BRIEFING_MIN_WORD_RATIO", 0.9)
 BRIEFING_EXPLAINER_OVER_STANDARD = _float("BRIEFING_EXPLAINER_OVER_STANDARD", 1.35)
-BRIEFING_EXPAND_ROUNDS = _int("BRIEFING_EXPAND_ROUNDS", 2)
+BRIEFING_EXPAND_ROUNDS = _int("BRIEFING_EXPAND_ROUNDS", 4)
+# Models habitually undershoot a long stated word target, so when a draft lands under the floor
+# (terse fallback model, partially-cut generation), expand passes that re-ask for exactly the
+# floor tend to stay under it — the stated target IS the model's ceiling of effort. Floor
+# variants therefore STATE floor × this overshoot in both the first-pass and expand prompts
+# while the loop still enforces the real floor (the 7-min deep dive of 2026-07-15 shipped at
+# 1170 words against the 1800 floor). briefing._ask_words caps the stated ask by the variant
+# ceiling and the max_tokens emission budget so the overshoot can never cause truncation.
+BRIEFING_ASK_OVERSHOOT = _float("BRIEFING_ASK_OVERSHOOT", 1.3)
 # Hard UPPER bound on the standard "Daily Briefing" so it can never run long. The floor/expand rails
 # above only ever push a show LONGER; this is the matching ceiling, enforced deterministically in
 # app/briefing.py (`_enforce_ceiling`): if a rendered script exceeds it, whole trailing story
@@ -265,16 +328,32 @@ BRIEFING_EXPAND_ROUNDS = _int("BRIEFING_EXPAND_ROUNDS", 2)
 BRIEFING_STANDARD_MAX_WORDS = _int("BRIEFING_STANDARD_MAX_WORDS", 1400)
 # variant -> render spec. `dialogue=False` forces a single-voice read (the flash); `True` attempts
 # the two-voice podcast (auto-falls back to mono when edge is unavailable / the script has no expert
-# turn). `max_tokens` bounds the script LLM output (≈1.8 tokens/word + headroom). `floor=True` marks
-# the variants that enforce the word floor above (the flash is a tight ceiling, never a floor).
-# `label` is the spoken/UI name (the web switcher has its own copy of these names).
+# turn). `floor=True` marks the variants that enforce the word floor above (the flash is a tight
+# ceiling, never a floor). `label` is the spoken/UI name (the web switcher has its own copy).
+# `max_tokens` bounds the script LLM output and MUST clear the variant's word ceiling with headroom,
+# or the model is silently cut off mid-sentence with no sign-off (the 2026-07-05 truncation bug).
+# Measured cost on this number/jargon-dense two-voice content is ~2.5 tokens per spoken word (NOT
+# the ~1.8 a plain-English estimate gives) PLUS the HOST:/EXPERT: labels + '## chapter' markers, so
+# budgets are set from the word CEILING (or the deep dive's ~2000-word floor) × ~2.6 + overhead:
+#   standard  1400-word ceiling × 2.6 ≈ 3640 + labels/markers → 4200
+#   explainer ~2400-word draft   × 2.6 ≈ 6240 + labels/markers → 7200
+# `app/briefing.py` also (a) detects a `finish_reason=='length'` truncation and prefers a complete
+# draft, and (b) deterministically trims any dangling partial sentence + re-attaches the sign-off
+# (`_finalize_close`), so a residual truncation still never ships a mid-sentence show.
 BRIEFING_VARIANT_SPECS = {
     "short":     {"target_words": BRIEFING_SHORT_TARGET_WORDS,     "max_bullets": BRIEFING_SHORT_MAX_BULLETS,     "dialogue": False, "max_tokens": 900,  "floor": False, "ceiling": 0,                          "label": "Flash"},
-    "standard":  {"target_words": BRIEFING_TARGET_WORDS,           "max_bullets": BRIEFING_MAX_BULLETS,            "dialogue": True,  "max_tokens": 2600, "floor": True,  "ceiling": BRIEFING_STANDARD_MAX_WORDS, "label": "Briefing"},
-    "explainer": {"target_words": BRIEFING_EXPLAINER_TARGET_WORDS, "max_bullets": BRIEFING_EXPLAINER_MAX_BULLETS,  "dialogue": True,  "max_tokens": 5200, "floor": True,  "ceiling": 0,                          "label": "Deep Dive"},
+    "standard":  {"target_words": BRIEFING_TARGET_WORDS,           "max_bullets": BRIEFING_MAX_BULLETS,            "dialogue": True,  "max_tokens": 4200, "floor": True,  "ceiling": BRIEFING_STANDARD_MAX_WORDS, "label": "Briefing"},
+    "explainer": {"target_words": BRIEFING_EXPLAINER_TARGET_WORDS, "max_bullets": BRIEFING_EXPLAINER_MAX_BULLETS,  "dialogue": True,  "max_tokens": 7200, "floor": True,  "ceiling": 0,                          "label": "Deep Dive"},
 }
 # Render order (also the order the web switcher shows them in): shortest → longest.
 BRIEFING_VARIANTS = ("short", "standard", "explainer")
+# Per-request LLM timeout for briefing SCRIPT calls only. The global LLM_TIMEOUT_SEC (60s) is a
+# fail-fast ceiling sized for the pipeline's typical ≤2000-token calls; a 7200-token explainer
+# draft at the primary model's measured ~50 tok/s needs ~145s, so under the global ceiling the
+# longest variant timed out on most mornings and fell to the (thin, free-tier) fallbacks — the
+# 2026-07-15 "no Deep Dive until 10:58" incident. 180s covers the worst case with headroom while
+# still letting a genuinely hung model fall through.
+BRIEFING_LLM_TIMEOUT_SEC = _float("BRIEFING_LLM_TIMEOUT_SEC", 180.0)
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 

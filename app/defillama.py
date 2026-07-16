@@ -174,20 +174,17 @@ def _cg_get(path: str) -> list | dict | None:
     return None
 
 
-def fetch_and_seed_coingecko(top_n: int = COINGECKO_TOP_N) -> int:
-    """Fetch top N coins from CoinGecko markets API and upsert into entity_memory.
-
-    For existing entities: only fills missing logo_url and merges aliases.
-    For new entities:      inserts with mention_count=1 (below display threshold
-                           of 2, invisible until organically mentioned in feeds).
-    """
+def _fetch_coingecko_markets(top_n: int, price_change_pct: str | None = None) -> list[dict]:
+    """Paginate CoinGecko's /coins/markets (shared by the entity seed + the market-data
+    snapshot below — both hit the same endpoint, just consume different fields)."""
     per_page = 250
     coins: list[dict] = []
     page = 1
+    pct_param = f"&price_change_percentage={price_change_pct}" if price_change_pct else ""
     while len(coins) < top_n:
         batch = _cg_get(
             f"/coins/markets?vs_currency=usd&order=market_cap_desc"
-            f"&per_page={per_page}&page={page}&sparkline=false"
+            f"&per_page={per_page}&page={page}&sparkline=false{pct_param}"
         )
         if not batch:
             break
@@ -195,8 +192,17 @@ def fetch_and_seed_coingecko(top_n: int = COINGECKO_TOP_N) -> int:
         page += 1
         if len(coins) < top_n:
             time.sleep(2)   # free-tier rate limit: ~30 req/min
+    return coins[:top_n]
 
-    coins = coins[:top_n]
+
+def fetch_and_seed_coingecko(top_n: int = COINGECKO_TOP_N) -> int:
+    """Fetch top N coins from CoinGecko markets API and upsert into entity_memory.
+
+    For existing entities: only fills missing logo_url and merges aliases.
+    For new entities:      inserts with mention_count=1 (below display threshold
+                           of 2, invisible until organically mentioned in feeds).
+    """
+    coins = _fetch_coingecko_markets(top_n)
     if not coins:
         log.warning("coingecko: no coins fetched")
         return 0
@@ -225,3 +231,63 @@ def fetch_and_seed_coingecko(top_n: int = COINGECKO_TOP_N) -> int:
 
     log.info("coingecko seed: upserted %d / %d coins into entity_memory", seeded, len(coins))
     return seeded
+
+
+# --------------------------------------------------------------------------- #
+# CoinGecko market-data snapshot (price / mcap / FDV / supply — analyst-grade facts)
+# --------------------------------------------------------------------------- #
+MARKET_DATA_TOP_N = 500
+
+
+def fetch_and_store_market_data(top_n: int = MARKET_DATA_TOP_N) -> int:
+    """Snapshot price/market-cap/FDV/supply for the top N coins by market cap into
+    `coingecko_market`, keyed by CoinGecko's own coin id (`gecko_id`).
+
+    This is DELIBERATELY a plain top-mcap snapshot rather than a per-entity lookup: it
+    covers every major token in one bounded pair of API calls (~2 req, well under the
+    free-tier rate limit), and joining it to an entity is left to the reader
+    (`get_market_data_by_slugs` matches on `entity_memory.slug == gecko_id`, the same
+    identity `fetch_and_seed_coingecko` already relies on for ~half of tracked
+    entities — see docs/conventions.md). An entity whose slug doesn't happen to equal
+    its CoinGecko id simply has no market row, mirroring the existing DeFiLlama TVL
+    exact-slug lookup's known gap (brand aggregation is a web-side-only convenience).
+    """
+    coins = _fetch_coingecko_markets(top_n, price_change_pct="24h,7d")
+    if not coins:
+        log.warning("coingecko market data: no coins fetched")
+        return 0
+
+    rows = []
+    for coin in coins:
+        gecko_id = (coin.get("id") or "").strip()
+        if not gecko_id:
+            continue
+        rows.append({
+            "gecko_id": gecko_id,
+            "symbol": (coin.get("symbol") or "").strip().upper(),
+            "price_usd": _safe_float(coin.get("current_price")),
+            "market_cap_usd": _safe_float(coin.get("market_cap")),
+            "fdv_usd": _safe_float(coin.get("fully_diluted_valuation")),
+            "circulating_supply": _safe_float(coin.get("circulating_supply")),
+            "total_supply": _safe_float(coin.get("total_supply")),
+            "market_cap_rank": coin.get("market_cap_rank"),
+            "price_change_24h_pct": _safe_float(coin.get("price_change_percentage_24h_in_currency")),
+            "price_change_7d_pct": _safe_float(coin.get("price_change_percentage_7d_in_currency")),
+        })
+    # CoinGecko paginates by LIVE market-cap rank; ranks shift between the page requests, so
+    # the same coin can appear on two pages. A single multi-row upsert touching one key twice
+    # is a Postgres CardinalityViolation (the recurring market-data cron crash, 2026-07-07) —
+    # keep only the first (best-rank) occurrence per gecko_id.
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for r in rows:
+        if r["gecko_id"] in seen:
+            continue
+        seen.add(r["gecko_id"])
+        deduped.append(r)
+    rows = deduped
+    if not rows:
+        return 0
+    db.upsert_market_data(rows)
+    log.info("coingecko market data: stored %d / %d coins", len(rows), len(coins))
+    return len(rows)

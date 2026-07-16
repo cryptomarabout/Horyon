@@ -92,8 +92,20 @@ def _ts(unix: int | None) -> datetime | None:
 
 
 def fetch_and_store() -> int:
-    """Fetch active proposals across all verified Snapshot spaces and upsert to DB."""
-    from app.db import upsert_governance_proposals
+    """Fetch active proposals across all verified Snapshot spaces and upsert to DB.
+
+    Also flips previously-stored 'active' rows whose voting window has ended to 'closed' —
+    the fetch only queries active proposals, so without this local transition every row
+    would stay 'active' forever and downstream VERIFIED DATABASE FACTS blocks would label
+    long-closed votes as active."""
+    from app.db import close_expired_proposals, upsert_governance_proposals
+
+    try:
+        n_closed = close_expired_proposals()
+        if n_closed:
+            log.info("snapshot: closed %d expired proposal(s)", n_closed)
+    except Exception:
+        log.warning("snapshot: closing expired proposals failed (non-fatal)", exc_info=True)
 
     space_ids = _get_verified_space_ids()
     if not space_ids:

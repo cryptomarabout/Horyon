@@ -1,8 +1,23 @@
-import { fmt } from "../../../lib/audio";
+"use client";
+
+import { useState } from "react";
+import { fmt, chapterDeepLink } from "../../../lib/audio";
 
 // Expanded chapter list — each row jumps the player to its start; an optional
-// ↗ opens the matching news story in the RightPanel (when onOpenStory is given).
-export default function AudioChapters({ chaps, activeChap, onJump, onOpenStory }) {
+// ↗ opens the matching news story in the RightPanel (when onOpenStory is given);
+// a 🔗 copies a shareable deep link that lands a listener mid-episode at this chapter.
+export default function AudioChapters({ chaps, activeChap, date, variant, onJump, onOpenStory }) {
+  const [copied, setCopied] = useState(-1);
+
+  const copyLink = async (i, start) => {
+    try {
+      const url = new URL(chapterDeepLink(date, variant, start), window.location.origin).href;
+      await navigator.clipboard.writeText(url);
+      setCopied(i);
+      setTimeout(() => setCopied((c) => (c === i ? -1 : c)), 1500);
+    } catch {}
+  };
+
   return (
     <ol className="audio-chapters">
       {chaps.map((c, i) => (
@@ -23,6 +38,16 @@ export default function AudioChapters({ chaps, activeChap, onJump, onOpenStory }
               )}
             </span>
           </button>
+          {date && (
+            <button
+              className="audio-chapter-link"
+              onClick={ev => { ev.stopPropagation(); copyLink(i, c.start); }}
+              title="Copy link to this chapter"
+              aria-label={`Copy link to chapter: ${c.title}`}
+            >
+              {copied === i ? "✓" : "🔗"}
+            </button>
+          )}
           {onOpenStory && c.bullet_title && (
             <button
               className="audio-chapter-open"

@@ -220,6 +220,20 @@ def count_stale_embeddings() -> int:
 # --------------------------------------------------------------------------- #
 # Digest
 # --------------------------------------------------------------------------- #
+def _fetchall_quality(sql: str, legacy_sql: str, params) -> list[dict]:
+    """Run a feed SELECT that reads ``quality_flag``; degrade to the legacy variant
+    (every row flagged 'ok') when the column has not been migrated yet."""
+    try:
+        return _fetchall(sql, params, dict_rows=True)
+    except Exception as exc:
+        if "quality_flag" not in str(exc):
+            raise
+        rows = _fetchall(legacy_sql, params, dict_rows=True)
+        for r in rows:
+            r["quality_flag"] = "ok"
+        return rows
+
+
 def get_recent_feed_items(hours: int, limit: int) -> list[dict]:
     """Return feed items whose effective publication date falls within the last `hours` hours.
 
@@ -230,17 +244,20 @@ def get_recent_feed_items(hours: int, limit: int) -> list[dict]:
     This query hits the existing functional index on COALESCE(pub_date, ingested_at) DESC
     and naturally excludes re-syndicated stale content (old pub_date → outside the window).
     Monitoring queries that need ingest-time counts use ingested_at directly.
+
+    Returns ``quality_flag`` so digest._format_items can annotate thin/boilerplate
+    items in the LLM prompt ('ok' for all rows pre-migration).
     """
-    return _fetchall(
-        """
-        SELECT content, link, creator, pub_date, source_type
-        FROM feed_items
-        WHERE COALESCE(pub_date, ingested_at) >= now() - make_interval(hours => %s)
-        ORDER BY COALESCE(pub_date, ingested_at) DESC
-        LIMIT %s
+    where = "COALESCE(pub_date, ingested_at) >= now() - make_interval(hours => %s)"
+    order = "ORDER BY COALESCE(pub_date, ingested_at) DESC LIMIT %s"
+    return _fetchall_quality(
+        f"""
+        SELECT content, link, creator, pub_date, source_type,
+               COALESCE(quality_flag, 'ok') AS quality_flag
+        FROM feed_items WHERE {where} {order}
         """,
+        f"SELECT content, link, creator, pub_date, source_type FROM feed_items WHERE {where} {order}",
         (hours, limit),
-        dict_rows=True,
     )
 
 
@@ -251,18 +268,20 @@ def get_feed_items_for_date(target_date: date_t, limit: int = 200) -> list[dict]
     published that day — not when the scraper happened to ingest it. Startup bulk-seed data
     can have ingested_at lag pub_date by a day+ (e.g. 2026-05-11 items ingested 2026-05-12),
     which made an ingested_at-keyed query return nothing for the earliest backfill date.
+
+    Returns ``quality_flag`` (see get_recent_feed_items) for the backfill digest path.
     """
-    return _fetchall(
-        """
-        SELECT content, link, creator, pub_date, source_type
-        FROM feed_items
-        WHERE COALESCE(pub_date, ingested_at) >= %s::date
-          AND COALESCE(pub_date, ingested_at) <  %s::date + interval '1 day'
-        ORDER BY COALESCE(pub_date, ingested_at) DESC
-        LIMIT %s
+    where = ("COALESCE(pub_date, ingested_at) >= %s::date "
+             "AND COALESCE(pub_date, ingested_at) < %s::date + interval '1 day'")
+    order = "ORDER BY COALESCE(pub_date, ingested_at) DESC LIMIT %s"
+    return _fetchall_quality(
+        f"""
+        SELECT content, link, creator, pub_date, source_type,
+               COALESCE(quality_flag, 'ok') AS quality_flag
+        FROM feed_items WHERE {where} {order}
         """,
+        f"SELECT content, link, creator, pub_date, source_type FROM feed_items WHERE {where} {order}",
         (target_date, target_date, limit),
-        dict_rows=True,
     )
 
 
@@ -395,21 +414,38 @@ def get_chronic_failing_sources(min_failures: int = 5) -> list[tuple[str, int]]:
 
 # --------------------------------------------------------------------------- #
 def search_feed(keyword: str, topk: int | None = None, days: int | None = None) -> list[dict]:
+    """Semantic feed search for LLM grounding (agent tool, related coverage, entity briefs).
+
+    Excludes ``thin_content`` rows: a <80-char teaser ("Learn more: …", "Source: …")
+    carries no reportable substance, and injecting one as "grounding" invites the model
+    to confabulate what sits behind the link. Falls back to the unfiltered query when
+    the quality_flag column has not been migrated yet.
+    """
     topk = topk or config.SEARCH_TOPK
     days = days or config.SEARCH_WINDOW_DAYS
     qvec = _vec_literal(embeddings.embed(embeddings.clean_for_embedding(keyword) or keyword))
-    with _conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SET LOCAL ivfflat.probes = %s", (config.IVFFLAT_PROBES,))
-        cur.execute(
-            """
-            SELECT content, link, creator, pub_date, source_type,
-                   1 - (embedding <=> %s::vector) AS score
-            FROM feed_items
-            WHERE embedding IS NOT NULL
-              AND COALESCE(pub_date, ingested_at) >= now() - make_interval(days => %s)
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
-            """,
-            (qvec, days, qvec, topk),
-        )
-        return cur.fetchall()
+
+    def _run(quality_filter: str) -> list[dict]:
+        with _conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SET LOCAL ivfflat.probes = %s", (config.IVFFLAT_PROBES,))
+            cur.execute(
+                f"""
+                SELECT content, link, creator, pub_date, source_type,
+                       1 - (embedding <=> %s::vector) AS score
+                FROM feed_items
+                WHERE embedding IS NOT NULL
+                  AND COALESCE(pub_date, ingested_at) >= now() - make_interval(days => %s)
+                  {quality_filter}
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (qvec, days, qvec, topk),
+            )
+            return cur.fetchall()
+
+    try:
+        return _run("AND COALESCE(quality_flag, 'ok') <> 'thin_content'")
+    except Exception as exc:
+        if "quality_flag" not in str(exc):
+            raise
+        return _run("")

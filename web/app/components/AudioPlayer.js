@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
+import { useSearchParams } from "next/navigation";
 import { useAudio } from "../../lib/audioContext";
-import { fmt } from "../../lib/audio";
+import { fmt, parseAudioDeepLink } from "../../lib/audio";
 import AudioVariants from "./audio/AudioVariants";
 import AudioCollapsed from "./audio/AudioCollapsed";
 import AudioChapters from "./audio/AudioChapters";
@@ -18,12 +19,26 @@ export default function AudioPlayer({ date, variants = [], onOpenStory = null })
     variant, active, playing, cur, dur, pct, rate,
     showChapters, showTranscript, hover, expanded, hasVariants, chaps, hasChapters, activeChap,
     audioRef,
-    setSource, toggle, seek, skip, jumpTo, cycleRate, switchVariant,
+    setSource, toggle, seek, skip, jumpTo, requestSeek, cycleRate, switchVariant,
     setShowChapters, setShowTranscript, setHover, setExpanded, setPlayerMounted, trackHover,
     openStory,
   } = useAudio();
 
   const list = Array.isArray(variants) ? variants.filter(Boolean) : [];
+  const searchParams = useSearchParams();
+  const deepLinkDone = useRef(false);
+
+  // Chapter deep link (?variant=&t=): once the source for this date is registered, seek to
+  // the linked time (switching length first if the link names one). Runs at most once.
+  useEffect(() => {
+    if (deepLinkDone.current || !active) return;
+    const { variant: v, t } = parseAudioDeepLink(searchParams);
+    if (t == null && !v) { deepLinkDone.current = true; return; }
+    deepLinkDone.current = true;
+    if (t != null) requestSeek(t, v);
+    else if (v && v !== variant) switchVariant(v);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, searchParams]);
 
   // Register audio source + open-story callback; signal this UI is mounted.
   // If audio is already playing when we mount (returning to Daily), restore expanded.
@@ -190,6 +205,8 @@ export default function AudioPlayer({ date, variants = [], onOpenStory = null })
             <AudioChapters
               chaps={chaps}
               activeChap={activeChap}
+              date={date}
+              variant={variant}
               onJump={jumpTo}
               onOpenStory={onOpenStory ? openStory : null}
             />
