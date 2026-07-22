@@ -30,7 +30,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://crypto:${POSTGRES_PASSWORD}@db:5432/crypto
       - CMC_API_KEY=${CMC_API_KEY:-}
-      - OLLAMA_HOST=http://host.docker.internal:11434
+      # Embeddings via NIM API (EMBED_* from .env / config defaults) — no host Ollama since 2026-07-21.
       - WEBHOOK_LISTEN_HOST=0.0.0.0
       - WEBHOOK_PORT=8080
       # Podcast transcripts: yt-dlp uses these cookies to get past YouTube's
@@ -85,8 +85,7 @@ services:
     # deploy/web_db_role.sql.
     environment:
       - DATABASE_URL=postgresql://horyon_web:${WEB_DB_PASSWORD}@db:5432/crypto
-      - OLLAMA_HOST=http://host.docker.internal:11434
-      - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+      # (web is zero-LLM / zero-embed — search is in-DB Postgres FTS; no Ollama/embed env needed)
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

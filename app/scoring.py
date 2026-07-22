@@ -82,6 +82,33 @@ _KEYWORD_PATTERNS = {
     for score, words in _KEYWORDS.items()
 }
 
+# Coarse category label for an item, derived from the SAME criticality keyword buckets above
+# (single-sourced — never fork the vocab). Used by the breaking-news alert path (app/alerts.py):
+# 'security' is the hard-trigger category; the rest just tag the alert line. Ordered by priority.
+_CATEGORY_KEYWORDS = [
+    ("security", _KEYWORDS[15]),
+    ("funding", ["raise", "raises", "raised", "funding", "fundraise", "seed round",
+                 "series a", "series b", "acquire", "acquires", "acquired", "acquisition",
+                 "merger", "buyout", "buys", "buyback", "ipo"]),
+    ("governance", ["governance", "vote", "proposal", "emergency", "pause", "shutdown",
+                    "shuts", "shut down", "winds down", "wind down"]),
+    ("launch", _KEYWORDS[7]),
+    ("partnership", _KEYWORDS[3]),
+]
+_CATEGORY_PATTERNS = [
+    (label, [re.compile(r"\b" + re.escape(w) + r"\b", re.IGNORECASE) for w in words])
+    for label, words in _CATEGORY_KEYWORDS
+]
+
+
+def _matched_category(text: str) -> str:
+    """Coarse event category from the criticality keyword buckets ('' if none match)."""
+    for label, pats in _CATEGORY_PATTERNS:
+        if any(p.search(text) for p in pats):
+            return label
+    return ""
+
+
 # ── Dedup / novelty (Jaccard-based semantic comparison) ────────────────────
 _EMOJI_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _DEDUP_STOP = frozenset({
@@ -441,15 +468,21 @@ def _signal_corroboration(credibilities: list[float]) -> int:
     return 0
 
 
-def _signal_amount(text: str) -> int:
+def _max_amount_usd(text: str) -> float:
+    """Largest USD magnitude mentioned in `text` (0.0 if none). The raw dollar value behind
+    _signal_amount's band — the alert hard-trigger needs the number, not the 0–20 score."""
     best = 0.0
     for num, unit in _AMOUNT_RE.findall(text):
         try:
             val = float(num.replace(",", ""))
         except ValueError:
             continue
-        val *= _MULT.get((unit or "").lower(), 1.0)
-        best = max(best, val)
+        best = max(best, val * _MULT.get((unit or "").lower(), 1.0))
+    return best
+
+
+def _signal_amount(text: str) -> int:
+    best = _max_amount_usd(text)
     if best >= 1e9:
         return 20
     if best >= 5e8:
@@ -555,6 +588,132 @@ def _apply_decay(score: int, first_seen_at: datetime, ref_time: datetime) -> tup
     return round(score * decay), round(decay, 3)
 
 
+# ── Shared reference data + per-item signal core ─────────────────────────────
+def build_ref_data(day: date_t) -> "_RefData":
+    """Load the once-per-run reference data (entity map, protocol TVLs, covered-word sets,
+    recent-coverage saturation) anchored at `day`. Shared by compute_importance_scores and
+    the alert path (app/alerts.py) so both score against the same corpus state."""
+    ref = _RefData()
+    ref.covered_word_sets = _build_covered_word_sets(day)
+    ref.recent_entity_coverage = _build_recent_entity_coverage(ref.entity_terms, day)
+    return ref
+
+
+def _score_item_signals(title: str, body: str, ref: "_RefData", day: date_t,
+                        ref_time: datetime) -> dict:
+    """Compute the deterministic Python signals (s1..s7 → python_total, pre-decay) for one
+    item — a digest bullet OR a raw feed item. This is the SINGLE implementation of the signal
+    math; compute_importance_scores and score_item both call it (no re-rolled scoring).
+
+    Returns python_total/source_count/first_seen_at/breakdown_partial exactly as the old inline
+    loop produced, PLUS max_credibility/amount_usd/category that the alert path needs (the
+    digest path simply ignores those extra keys)."""
+    text = f"{title} {body}".strip()
+    entities = _bullet_entities(text, ref)
+    terms = [t for t, _ in entities] or _significant_words(text)
+
+    # 48h window (was 24h): the old cliff zeroed s1/s3 for stories that broke the previous
+    # morning (~12% of bullets); decay discounts age instead.
+    feed = db.get_feed_items_matching_terms(terms, day, window_hours=48) if terms else []
+    if not entities and len(terms) >= 2:
+        # Entity-less items fall back to generic significant words, and the DB match is an OR —
+        # "volume" or "governance" alone matches half the corpus and would max s1/s3 on pure
+        # noise. Require ≥2 distinct fallback terms so only genuinely related coverage counts.
+        pats = [re.compile(r"\b" + re.escape(t) + r"\b", re.IGNORECASE) for t in terms]
+        feed = [r for r in feed
+                if sum(1 for p in pats if p.search(r.get("content") or "")) >= 2]
+
+    # Thin_content items don't corroborate (a 50-char teaser is not evidence a story is real),
+    # but still count for velocity (publication timing is valid evidence either way).
+    substantive_feed = [r for r in feed if r.get("quality_flag", "ok") != "thin_content"]
+    source_keys = {get_source_key(r["link"]) for r in substantive_feed if r.get("link")}
+    source_keys.discard("")
+    credibilities = [get_source_credibility(sk) for sk in source_keys]
+
+    # Velocity counts distinct-SOURCE pickup — earliest item per source key (thin or not).
+    first_ts_by_source: dict[str, datetime] = {}
+    for r in feed:
+        ts = r.get("ts")
+        sk = get_source_key(r.get("link") or "")
+        if ts and sk and (sk not in first_ts_by_source or ts < first_ts_by_source[sk]):
+            first_ts_by_source[sk] = ts
+    timestamps = [r["ts"] for r in feed if r.get("ts")]
+
+    s1 = _signal_corroboration(credibilities)
+    # Financial magnitude reads the item's OWN text only (scanning corroborators imported
+    # ambient figures into unrelated items).
+    s2 = _signal_amount(text)
+    s3 = _signal_velocity(list(first_ts_by_source.values()))
+    s4 = _signal_entity_weight(entities, ref)
+    s5 = _signal_criticality(text)
+    s6 = _signal_novelty(title, ref)
+    p_total = min(100, s1 + s2 + s3 + s4 + s5 + s6)
+
+    # Signal 7 (penalty): recent-coverage saturation — bypassed for a hack/exploit (s5≥15) or
+    # a ≥$500M event (s2≥16) so real news is never buried.
+    s7 = _signal_saturation(entities, ref)
+    if s5 >= 15 or s2 >= 16:
+        s7 = 0
+    p_total = max(0, p_total - s7)
+
+    # Low-credibility penalty: only Tier-3 clickbait reported it.
+    max_cred = max(credibilities) if credibilities else 1.0
+    if max_cred <= 0.4:
+        p_total = round(p_total * 0.5)
+
+    return {
+        "entities": entities,
+        "python_total": p_total,
+        # Distinct substantive SOURCES (same base as s1).
+        "source_count": len(source_keys),
+        "first_seen_at": min(timestamps) if timestamps else ref_time,
+        "breakdown_partial": {
+            "s1": s1, "s2": s2, "s3": s3, "s4": s4, "s5": s5, "s6": s6,
+            "s7_saturation": -s7,
+            "python_total": p_total,
+        },
+        "max_credibility": max_cred,
+        "amount_usd": _max_amount_usd(text),
+        "category": _matched_category(text),
+    }
+
+
+def prescreen_category_amount(text: str) -> tuple[str, float]:
+    """Cheap, NO-DB signals for an item's text: (category, largest_usd_amount). The alert path
+    (app/alerts.py) uses this to skip the expensive corroboration scoring for items that could
+    never clear a high score floor — an item with no event category AND no $ amount tops out at
+    s1+s3+s4+s6 = 25+15+20+5 = 65 (pre-decay), below the default ALERT_MIN_SCORE of 70."""
+    return _matched_category(text), _max_amount_usd(text)
+
+
+def score_item(item: dict, ref: "_RefData", day: date_t,
+               ref_time: "datetime | None" = None) -> dict:
+    """Score a single feed item for the breaking-news alert path (app/alerts.py).
+
+    `item` = {title, content, ts} (a feed_items row). Reuses the SAME signal math as the daily
+    digest via _score_item_signals, then applies temporal decay off the item's own timestamp.
+    `ref` is built once per scan with build_ref_data(day). Returns
+    {score (0-100, decayed), source_count, category, amount_usd, max_credibility, breakdown}.
+    """
+    if ref_time is None:
+        ref_time = datetime.now(timezone.utc)
+    sig = _score_item_signals(item.get("title") or "", item.get("content") or "",
+                              ref, day, ref_time)
+    first_seen = item.get("ts") or sig["first_seen_at"]
+    final, decay = _apply_decay(sig["python_total"], first_seen, ref_time)
+    final = max(0, min(100, final))
+    breakdown = dict(sig["breakdown_partial"])
+    breakdown["decay"] = decay
+    return {
+        "score": final,
+        "source_count": sig["source_count"],
+        "category": sig["category"],
+        "amount_usd": sig["amount_usd"],
+        "max_credibility": sig["max_credibility"],
+        "breakdown": breakdown,
+    }
+
+
 # ── Public entry point ───────────────────────────────────────────────────────
 def compute_importance_scores(bullets: list[dict], digest_date: str) -> list[dict]:
     """Enrich each bullet with importance_score, source_count, score_breakdown.
@@ -576,95 +735,23 @@ def compute_importance_scores(bullets: list[dict], digest_date: str) -> list[dic
     ref_time = now if day >= now.date() else datetime.combine(day, time(9, 0), tzinfo=timezone.utc)
 
     try:
-        ref = _RefData()
-        ref.covered_word_sets = _build_covered_word_sets(day)
-        ref.recent_entity_coverage = _build_recent_entity_coverage(ref.entity_terms, day)
+        ref = build_ref_data(day)
     except Exception:
         log.warning("scoring: reference data load failed — scores set to None", exc_info=True)
         for b in out:
             b["importance_score"] = b["source_count"] = b["score_breakdown"] = None
         return out
 
-    # ── Per-bullet Python signals ──
+    # ── Per-bullet Python signals (shared core: _score_item_signals) ──
     for b in out:
         try:
-            title = b.get("title", "") or ""
-            body = b.get("body", "") or ""
-            text = f"{title} {body}".strip()
-            entities = _bullet_entities(text, ref)
-            terms = [t for t, _ in entities] or _significant_words(text)
-
-            # 48h window (was 24h): the old cliff zeroed s1/s3 for stories that broke
-            # the previous morning (~12% of bullets); decay discounts age instead.
-            feed = db.get_feed_items_matching_terms(terms, day, window_hours=48) if terms else []
-            if not entities and len(terms) >= 2:
-                # Entity-less bullets fall back to generic significant words, and the DB
-                # match is an OR — "volume" or "governance" alone matches half the corpus
-                # and would max s1/s3 on pure noise. Require ≥2 distinct fallback terms
-                # per item so only genuinely related coverage corroborates.
-                pats = [re.compile(r"\b" + re.escape(t) + r"\b", re.IGNORECASE) for t in terms]
-                feed = [r for r in feed
-                        if sum(1 for p in pats if p.search(r.get("content") or "")) >= 2]
-
-            # Exclude thin_content items from the corroboration signal. A 50-char teaser
-            # blurb (e.g. Blockworks newsletters) is not strong evidence that a story is
-            # real — it just means the site mentioned a keyword. Thin items still count
-            # for velocity (publication timing is valid evidence either way).
-            substantive_feed = [r for r in feed
-                                 if r.get("quality_flag", "ok") != "thin_content"]
-
-            source_keys = {get_source_key(r["link"]) for r in substantive_feed if r.get("link")}
-            source_keys.discard("")
-            credibilities = [get_source_credibility(sk) for sk in source_keys]
-
-            # Velocity counts distinct-SOURCE pickup — the earliest item per source key
-            # (thin or not). One account re-posting a story five times is not velocity.
-            first_ts_by_source: dict[str, datetime] = {}
-            for r in feed:
-                ts = r.get("ts")
-                sk = get_source_key(r.get("link") or "")
-                if ts and sk and (sk not in first_ts_by_source or ts < first_ts_by_source[sk]):
-                    first_ts_by_source[sk] = ts
-            timestamps = [r["ts"] for r in feed if r.get("ts")]
-
-            s1 = _signal_corroboration(credibilities)
-            # Financial magnitude reads the bullet's OWN text only. Scanning corroborating
-            # items imported ambient figures (an adjacent "$1B volume milestone" tweet)
-            # into unrelated bullets — half the corpus maxed s2 that way.
-            s2 = _signal_amount(text)
-            s3 = _signal_velocity(list(first_ts_by_source.values()))
-            s4 = _signal_entity_weight(entities, ref)
-            s5 = _signal_criticality(text)
-            s6 = _signal_novelty(title, ref)
-            p_total = min(100, s1 + s2 + s3 + s4 + s5 + s6)
-
-            # Signal 7 (penalty): recent-coverage saturation. A routine new bullet about a
-            # protocol that has dominated the last week is worth less — UNLESS it carries
-            # genuinely new weight (a hack/exploit s5≥15, or a ≥$500M event s2≥16), in which
-            # case it bypasses the penalty entirely. This thins out the Aave/Morpho/Pendle
-            # yield-rotation drumbeat without burying real news about them.
-            s7 = _signal_saturation(entities, ref)
-            if s5 >= 15 or s2 >= 16:
-                s7 = 0
-            p_total = max(0, p_total - s7)
-
-            # Apply low credibility penalty if only Tier 3 clickbait sources reported it
-            max_cred = max(credibilities) if credibilities else 1.0
-            if max_cred <= 0.4:
-                p_total = round(p_total * 0.5)
-
-            b["_entities"] = entities
-            b["_python_total"] = p_total
-            # Distinct substantive SOURCES (same base as s1) — the old distinct-domain
-            # count collapsed every Twitter source into one "nitter.net" domain, so the
-            # UI badge showed "1 source" beside a maxed corroboration signal.
-            b["_source_count"] = len(source_keys)
-            b["_first_seen_at"] = min(timestamps) if timestamps else ref_time
-            b["_breakdown_partial"] = {
-                "s1": s1, "s2": s2, "s3": s3, "s4": s4, "s5": s5, "s6": s6,
-                "s7_saturation": -s7,
-                "python_total": p_total,
-            }
+            sig = _score_item_signals(b.get("title", "") or "", b.get("body", "") or "",
+                                      ref, day, ref_time)
+            b["_entities"] = sig["entities"]
+            b["_python_total"] = sig["python_total"]
+            b["_source_count"] = sig["source_count"]
+            b["_first_seen_at"] = sig["first_seen_at"]
+            b["_breakdown_partial"] = sig["breakdown_partial"]
         except Exception:
             log.debug("scoring: signal computation failed for %r", b.get("title"), exc_info=True)
             b["_entities"] = []

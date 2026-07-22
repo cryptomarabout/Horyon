@@ -59,6 +59,23 @@ export async function getDigest(date) {
 }
 
 
+// Intraday update rows for a date (app/intraday.py — 13:00 + 19:00 UTC), oldest first, so the
+// Daily Briefs page can render an "Intraday updates" timeline under the morning brief. Not
+// unstable_cache'd: the page is force-dynamic and updates land mid-day, so freshness wins over
+// a short stale window (the query is a tiny indexed lookup).
+export async function getDigestUpdates(date) {
+  const { rows } = await pool.query(
+    `SELECT to_char(created_at,'YYYY-MM-DD"T"HH24:MI:SS') AS created_at,
+            seq, content
+     FROM digest_updates
+     WHERE date = $1::date AND error IS NULL AND content IS NOT NULL AND content <> ''
+     ORDER BY created_at ASC`,
+    [date]
+  );
+  return rows;
+}
+
+
 export async function latestDate() {
   // Skip errored / empty digest rows so the home never lands on a failed run.
   const { rows } = await pool.query(

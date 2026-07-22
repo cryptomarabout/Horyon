@@ -94,13 +94,13 @@
   .market-bandeau .market-bar { flex-wrap: nowrap; }
   .market-bandeau .market-asset-inline {
     flex: 1;
+    gap: 4px;
+    padding: 8px 6px;
     border-bottom: none;
     border-right: none;
     justify-content: flex-start;
   }
-  .market-bandeau .market-asset-inline:first-child {
-    border-right: 1px solid var(--border);
-  }
+  /* No divider between BTC and ETH on mobile — the two compact readouts sit flush. */
   .market-bandeau .market-divider { display: none; }
   .market-bandeau .market-footer-inline { display: none; }
 }
@@ -430,11 +430,14 @@
   /* Mobile footer = BTC/ETH compact prices + 24h change. Keep 24h, drop the
      longer windows, and swap each price for its compact "k" variant. The "24h"
      label is redundant once it's the only window, so hide it — keep the colored
-     percentage. */
+     percentage. Padding/gaps below are trimmed from desktop so both assets fit
+     the narrow footer strip without the ticker needing to scroll. */
   .p7d, .p30d { display: none; }
   .market-price--full { display: none; }
   .market-price--compact { display: inline; }
   .market-chg-label { display: none; }
+  .market-bandeau .market-chg-group { gap: 2px; margin-left: 4px; }
+  .market-bandeau .market-chg { padding: 2px 4px; }
 }
 
 .market-footer-item {

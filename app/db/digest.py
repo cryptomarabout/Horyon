@@ -80,6 +80,53 @@ def get_recent_digests(limit: int = 15) -> list[tuple]:
     )
 
 
+# ── Intraday digest updates (app/intraday.py) ───────────────────────────────
+def insert_digest_update(d: date_t, seq: int, content: str, model_used: str = "",
+                         window_start=None, item_count: int | None = None,
+                         trigger: str = "cron", error: str | None = None) -> None:
+    _execute(
+        "INSERT INTO digest_updates"
+        " (created_at, date, seq, content, model_used, window_start, item_count, trigger, error)"
+        " VALUES (now(), %s, %s, %s, %s, %s, %s, %s, %s)",
+        (d, seq, content, model_used, window_start, item_count, trigger, error),
+    )
+
+
+def get_digest_updates(d: date_t) -> list[dict]:
+    """All error-free intraday update rows for a date, oldest first (the timeline order the
+    web renders and app/intraday.py appends to). Empty list if none."""
+    rows = _fetchall(
+        """SELECT created_at, seq, content, model_used
+           FROM digest_updates
+           WHERE date = %s AND error IS NULL AND content IS NOT NULL AND content <> ''
+           ORDER BY created_at ASC""",
+        (d,),
+    )
+    return [
+        {"created_at": r[0], "seq": r[1], "content": r[2], "model_used": r[3]}
+        for r in rows
+    ]
+
+
+def get_last_covered_ts(d: date_t):
+    """The most recent created_at among a date's morning digest (error-free) AND its intraday
+    updates — the anchor app/intraday.py uses as `since_ts` for the next update's window.
+    Returns a timestamptz or None (no successful digest/update yet today)."""
+    row = _fetchone(
+        """SELECT max(ts) FROM (
+               SELECT created_at AS ts FROM crypto_digest
+                 WHERE date = %s AND error IS NULL
+                   AND content IS NOT NULL AND length(content) > 40
+               UNION ALL
+               SELECT created_at AS ts FROM digest_updates
+                 WHERE date = %s AND error IS NULL
+                   AND content IS NOT NULL AND content <> ''
+           ) t""",
+        (d, d),
+    )
+    return row[0] if row else None
+
+
 def get_recent_keyword_analyses(limit: int = 15) -> list[tuple]:
     return _fetchall(
         """SELECT created_at, keyword, model_used, duration_ms

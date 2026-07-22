@@ -62,6 +62,23 @@ The full, history-carrying version. CLAUDE.md keeps the one-line must-knows; thi
   `feeds.py`; `FEED_CREDIBILITY` keeps BOTH domain keys (historical items still corroborate). When
   `get_chronic_failing_sources` warns, check for a URL move FIRST (curl -L with a browser UA) before considering
   a drop.
+- **Nitter firewall ban → sharded low-burst fetching (2026-07-22)**: all 115 Twitter sources ride the single
+  `nitter.net` host, and the old `fetch_all` hit it with a full 115-request burst (10 workers) every 20 min.
+  On 2026-07-21 nitter's anti-scraper firewall started SYN-DROPPING this VM's IP (Errno 110 on every handle;
+  ~90% of ingest volume gone). Diagnosis matters: nitter was NOT down — updownradar's monitor got HTTP 200
+  while both this VM (timeout = DROP) and other cloud ranges (refused) were blocked, and the ban LAPSED twice
+  (22:37, ~06:00) only for the very next full burst to instantly re-trigger it. The total cutoff coincided
+  with a bot restart because the startup ingest (`next_run_time=now`) fires a full burst ~6 min after the
+  previous cycle's — a deploy double-burst. Fixes in `ingest.py`: (1) `fetch_source` now fetches via urllib
+  with an EXPLICIT `FEED_FETCH_TIMEOUT_SEC` (20s) and hands bytes to feedparser — `feedparser.parse(url)` has
+  NO timeout (OS ≈130s SYN retries), so a firewalled host pinned pool slots and pushed cycles past their
+  20-min interval; (2) `nitter_shard` fetches 1/`NITTER_SHARDS` (3) of the handles per cycle (deterministic
+  time-slot round-robin, no state; every handle still polled hourly) at `NITTER_FETCH_CONCURRENCY` (3) — the
+  host never sees a scraper-shaped burst from us again. `NITTER_SHARDS=1` restores fetch-everything. Note
+  `ingest_run.sources_ok/failed` totals now reflect the per-cycle SUBSET (~50 not 126) — don't read a lower
+  total as sources lost. Alternate instances probed during the incident (all unusable): xcancel
+  (email-whitelist), poast/lightbrd/nitter.space (403), privacyredirect (502). If the ban persists despite
+  sharding, the remaining levers are fewer handles (ask first — that's a source drop) or an egress IP change.
 
 - **Shared pure primitives: `app/util.py` + `llm.strip_think` (2026-07-15 dedup pass)**: before this, the tree
   carried 12 module-level copies of the HTML-tag-strip regex, 4 of `_plain`, 3 of `_fmt_usd`, 2 of `_decode`,
@@ -79,16 +96,43 @@ The full, history-carrying version. CLAUDE.md keeps the one-line must-knows; thi
 
 ## pgvector / embeddings
 
-- **pgvector recall**: `db.search_feed()` must `SET LOCAL ivfflat.probes` per query — without it the 30-day
-  window returns ~1 result.
-- **`SET LOCAL` syntax**: does not accept `$N` params in node-postgres. Interpolate safe integer constants
-  directly: `` `SET LOCAL ivfflat.probes = ${PROBES}` ``. psycopg2 `%s` with integers is fine (mogrified
-  client-side).
-- **Ollama embed context window**: `nomic-embed-text` has a 2048-token context; a long article/transcript 500s
-  with "input length exceeds the context length" and leaves the row un-embedded forever (retried every cycle).
-  `embeddings.embed()` truncates to `EMBED_MAX_CHARS=6000` (word-boundary) and halves-and-retries on the specific
-  error. Keep the cap. (The public web search route no longer embeds — its free-text path is Postgres FTS, see
-  `web/api/search`.)
+- **Embedding provider = NVIDIA NIM `nvidia/nemotron-3-embed-1b` (2048-dim)** — migrated off host Ollama
+  `nomic-embed-text` (768-dim) on 2026-07-21 (`app/embeddings.py`). Gotchas that shaped the migration, each a
+  real dead-end hit on the way in:
+  - **The `:free` id 404s on NIM.** `:free` is an OpenRouter suffix; the NIM id is bare `nvidia/nemotron-3-embed-1b`.
+    Probe `client.models.list()` on `NIM_BASE_URL` to get exact ids.
+  - **Fixed 2048 dims, no Matryoshka.** The API rejects any `dimensions` other than 2048 (`dimensions must be
+    one of 2048`), so you can't shrink it to keep the old column/index — the schema had to move to `vector(2048)`.
+  - **Asymmetric model.** query vs passage embeddings of the same text differ (cos ~0.83). Stored corpus embeds
+    `input_type="passage"` (`_embed_batch`, narratives signals, podcast summaries); `search_feed` embeds the
+    query `input_type="query"`. Mixing them degrades recall. `PASSAGE`/`QUERY` constants live in `embeddings.py`.
+  - **Cross-provider fallback = OpenRouter, SAME model.** OpenRouter serves the identical model as
+    `nvidia/nemotron-3-embed-1b:free` (2048-dim, honors `input_type`; vectors numerically **identical** to NIM
+    — cos 1.0000 — so mixing providers in one column is safe). `embeddings._embed_call` walks the chain
+    NIM→OpenRouter each round: a 429/5xx on NIM fails over immediately; only a whole-chain failure backs off and
+    retries (`EMBED_MAX_RETRIES` rounds), then the ingest self-heal (NULL rows re-embed next cycle) is the
+    backstop. Two OpenRouter gotchas: **the bare id 404s — the `:free` suffix is required there** (that's why an
+    early probe wrongly concluded "no endpoint"); and the request MUST set **`encoding_format="float"`** — the
+    OpenAI SDK defaults to base64, which OpenRouter returns undecodably ("No embedding data received"). NIM
+    accepts float too, so it's set for the whole chain.
+  - **`.env` overrides the config default.** `.env` pinned `EMBED_MODEL=nomic-embed-text`; the config default
+    alone won't switch models. The migration updated `.env` (`EMBED_MODEL=nvidia/nemotron-3-embed-1b`; `EMBED_*`
+    creds default to the `NIM_*` chat creds).
+- **No ANN index at 2048 dims → exact cosine scan.** pgvector's ivfflat AND hnsw indexes cap at **2000 dims**,
+  so a `vector(2048)` column cannot be indexed by either; the pre-migration `feed_items_embedding_idx` ivfflat
+  was dropped. `search_feed` does an exact `ORDER BY embedding <=> $q` scan (~tens of ms at ~33k rows).
+  `SET LOCAL ivfflat.probes` is now a harmless no-op (kept; no `$N` params in node-postgres — interpolate safe
+  ints). **Scale path:** if exact scan gets slow, switch the column to `halfvec(2048)` (16-bit; ~half the
+  space) + an `hnsw` index (indexable up to 4000 dims) and set `hnsw.ef_search` per query.
+- **Batch the embed calls.** The API takes up to ~100 inputs per request; `embeddings.embed_batch(texts,
+  input_type)` chunks by `EMBED_BATCH_SIZE` (64) — the ingest embed path and narratives use it (one request per
+  chunk, not one per row). The one-shot corpus re-embed is `python3 -m app.reembed` (resumable; ~4.8k rows/min
+  observed, ~6 min for 30k). During that backfill `search_feed` recall is degraded (rows NULL until re-embedded)
+  — run it off the 07:00 digest window.
+- **Embed input cap**: over-length input is truncated **server-side** (`truncate:"END"` in the request), and
+  `embeddings.embed()` still hard-caps to `EMBED_MAX_CHARS=6000` (word-boundary) client-side so a pathological
+  item can't blow the token budget. Keep the cap. (The public web search route no longer embeds — its free-text
+  path is Postgres FTS, see `web/api/search`.)
 - **Public web free-text search = Postgres FTS, not pgvector**: `feed_items.content_tsv` is a generated
   `tsvector` (HTML stripped via `regexp_replace` — IMMUTABLE, so allowed in a generated column) with a GIN index;
   query via `websearch_to_tsquery('english', $1)` (never throws on junk, empty tsquery → 0 rows → word-boundary
@@ -461,6 +505,43 @@ The full, history-carrying version. CLAUDE.md keeps the one-line must-knows; thi
   calls the LLM + empty-guard BEFORE deleting the old row, so a failed/empty date keeps its existing digest; the
   per-date loop catches exceptions. Resume with `--from-date`. Backfill is idempotent for digests/analyses
   (delete+insert) but `analyst_notes` is insert-only → clear the date range first.
+- **Intraday updates are INCREMENTAL, not a re-digest (2026-07-21, `app/intraday.py`)** — why: "once a day
+  isn't enough." The obvious approach (rerun the full `run_digest` at 13:00/19:00) is wrong: it re-summarizes
+  the whole 24h window (redundant with the morning), and `orchestrate_post_digest` would rebuild narratives +
+  re-render 3 audio variants + every entity brief each time — expensive, and it clobbers the morning's rich
+  artifacts. Instead each slot summarizes ONLY items since `db.get_last_covered_ts(date)` (latest morning-
+  digest / prior-update `created_at`, floored to `now - INTRADAY_WINDOW_MAX_HOURS` so a long gap can't balloon
+  into a full re-digest), stores a `digest_updates` row, and sends a short Telegram message — no post-digest
+  pipeline. The prompt is `_DIGEST_RULES` **verbatim** with only the bullet count relaxed
+  (`prompts._INTRADAY_RULES` via `.replace`, so the anti-hallucination rails never fork), and the output runs
+  the SAME guard chain as the digest. Below `INTRADAY_MIN_ITEMS` new items → skip (no thin/empty update). The
+  web reads `digest_updates` (grantless-table rule: `web_db_role.sql` covers it — default privileges already
+  granted SELECT since the ALTER DEFAULT PRIVILEGES ran as `crypto`). Shares `main._digest_lock` with the
+  digest cron + self-heal so builds never overlap.
+- **Breaking-news alerts are DETERMINISTIC and NEWS-only (2026-07-21, `app/alerts.py`)** — why: the user
+  wanted "alerts on important news" in real time. Design chose NO LLM: an alert quotes a feed item's own
+  title + source + link, so there is zero hallucination/modality surface (only `sanitize`) and zero LLM cost —
+  it rides the existing 20-min ingest cycle (`main._maybe_send_alerts`, mirroring the digest/audio self-heal).
+  The scoring is the SAME `scoring.py` core as the digest — the per-bullet signal loop was extracted into
+  `_score_item_signals`, shared by `compute_importance_scores` and the new `score_item` (never re-roll
+  scoring). **The 12h dry-run before shipping drove three calibrations** (this is why you dry-run):
+  (1) raw tweets scored noisily — the whole tweet is the `title`, price targets inflate the $ amount, generic
+  words inflate corroboration — so alerts are **NEWS-source only** (`ALERT_NEWS_ONLY`; tweets still feed the
+  digest); (2) crypto news sites carry price/TA/ETF/treasury/regulation stories the digest HARD-DISCARDs, so a
+  deterministic topical exclude (`_EXCLUDE_RE`) + a required event category (`prescreen_category_amount`, which
+  also pre-gates the expensive corroboration query) drop them; (3) the genuinely-important, heavily-
+  corroborated stories (a major merger collapse at 31 sources, a flagship L2 launch at 63) clustered at
+  score **68–69**, so `ALERT_MIN_SCORE` is **65**, not 70 — 70 narrowly missed the real news. Same-story dedup
+  needed to be MORE aggressive than the digest's `is_semantic_duplicate` (0.6 Jaccard, tuned conservative
+  because the digest LLM does the merging): three outlets covering one story wrote three near-but-not-identical
+  headlines that slipped the 0.6 gate, so `_same_story` adds a looser fallback (≥3 shared significant words,
+  chain-disjoint titles excluded) — alerts prefer NOT re-sending over catching every angle. Hard trigger: a
+  `security` event with ≥ `ALERT_HARD_AMOUNT` bypasses score/corroboration (real theft is never gated). Rate
+  caps (`ALERT_MAX_PER_HOUR`/`_DAY`) + optional `ALERT_QUIET_HOURS_UTC`. Telegram-only — `alerts_sent` is
+  bot-only, never surfaced on the web. **The topical exclude is NEVER applied to security-category items**
+  (2026-07-22 review fix): "DAO treasury drained in $60M exploit" contains "treasury" and would have been
+  dropped by the TradFi exclude before scoring — the exclude list is for market commentary, not incident
+  reports, so `prescreen_category_amount` runs FIRST and `security` skips `_EXCLUDE_RE` entirely.
 
 ## Narratives
 

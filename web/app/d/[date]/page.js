@@ -1,6 +1,6 @@
 import { Suspense, cache } from "react";
 import { notFound } from "next/navigation";
-import { getDigest, getBulletAnalyses, getBulletTimes, listDigests, getPodcastsForDate, getAudioBriefing } from "../../../lib/db";
+import { getDigest, getBulletAnalyses, getBulletTimes, listDigests, getPodcastsForDate, getAudioBriefing, getDigestUpdates } from "../../../lib/db";
 import { parseDigest, timeAgo, sourceLabel, isValidDigestDate } from "../../../lib/digest";
 import { buildProjectHints } from "../../../lib/projects";
 import BulletFeed from "../../components/BulletFeed";
@@ -109,9 +109,10 @@ async function DigestFeed({ date }) {
   // Wave 2: needs the parsed bullet list. buildProjectHints is now 100% DB (zero external
   // calls) + cached per date, so we await it here and SSR the entity/category chips into
   // the first paint instead of the old client fetch that made chips pop in after hydration.
-  const [bulletTimes, hints] = await Promise.all([
+  const [bulletTimes, hints, updates] = await Promise.all([
     getBulletTimes(bullets.map(b => b.link)),
     buildProjectHints(row.date, bullets),
+    getDigestUpdates(date),
   ]);
 
   const enrichedBullets = bullets.map(b => ({
@@ -130,6 +131,7 @@ async function DigestFeed({ date }) {
       signalsAgo={timeAgo(row.created_at)}
       audio={audio}
       initialHints={hints}
+      updates={updates}
     />
   );
 }

@@ -33,7 +33,8 @@ ALTER ROLE horyon_web WITH PASSWORD :'web_pw';
 GRANT CONNECT ON DATABASE crypto TO horyon_web;
 GRANT USAGE ON SCHEMA public TO horyon_web;
 
--- Read everything the public site renders.
+-- Read everything the public site renders (incl. digest_updates — the intraday-updates
+-- timeline on Daily Briefs; alerts_sent is bot-only and intentionally not surfaced).
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO horyon_web;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO horyon_web;
 

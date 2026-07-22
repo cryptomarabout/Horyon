@@ -368,7 +368,7 @@ def _embed_summary(analysis: dict) -> list[float] | None:
     if not text:
         return None
     try:
-        return embeddings.embed(text)
+        return embeddings.embed(text, input_type=embeddings.PASSAGE)
     except Exception:
         log.debug("podcast summary embed failed", exc_info=True)
         return None

@@ -55,6 +55,23 @@ KNOWN_FACTS: dict[str, str] = {
         "testnet or not yet live. Always describe Base as a live mainnet chain; describe the upgrade "
         "or feature as upcoming (in testnet, ahead of a future mainnet rollout)."
     ),
+    # Positive correction (NOT a pre-launch fact — robinhood-chain is in ESTABLISHED_MAINNET).
+    # Motivating incident (2026-07-20): Robinhood Chain launched on mainnet 2026-07-01, but its
+    # OWN pre-launch coverage from late June ("Robinhood is launching its own public blockchain",
+    # hackathon prize copy) keeps leaking into the model's background prose. When a fresh bullet
+    # (Arcus hitting $17M TVL) needed elaboration, both the digest_bullet_analysis text AND the
+    # standard/explainer audio scripts independently described the chain as something Robinhood
+    # "has signaled plans to expand" into / "will use" in the future — the OPPOSITE tense error
+    # from Arc (a live chain downgraded to pre-launch, not a pre-launch chain upgraded to live).
+    "robinhood-chain": (
+        "Robinhood Chain is a LIVE Ethereum layer-2 mainnet (an Arbitrum-based rollup) — it went "
+        "live on mainnet 2026-07-01 and is NOT a planned, upcoming, or future network. Apps already "
+        "trading on it (Arcus, Lighter, Uniswap v2/v3/v4, the prediction market World, and others) "
+        "are LIVE deployments happening today, not announcements of future intent. Never describe "
+        "Robinhood Chain as something Robinhood 'plans to', 'has signaled', 'has said it will', or "
+        "'intends to' launch/expand into — say it IS live and describe what is currently running "
+        "on it."
+    ),
 }
 
 # Surface terms that should trigger each fact when they appear (word-boundary) in raw text.
@@ -67,6 +84,13 @@ TRIGGER_TERMS: dict[str, list[str]] = {
     # Anthropic AI model names — trigger on specific version strings to avoid bare-word false positives.
     "fable": ["fable 5", "claude fable", "fable model"],
     "mythos-ai": ["mythos 5", "mythos v5", "claude mythos", "mythos model"],
+    # Cover the fragmented entity names this chain gets extracted under (robinhood-chain,
+    # robinhood-app-chain, robinhood-crypto-chain are the same real network) so the fact fires
+    # regardless of which literal phrase a given article/bullet used.
+    "robinhood-chain": [
+        "robinhood chain", "robinhood-chain", "robinhood app chain", "robinhood crypto chain",
+        "rh chain",
+    ],
 }
 
 # Entities that are DEFINITIVELY live on mainnet. The pre-launch auto-discovery in
@@ -82,6 +106,8 @@ TRIGGER_TERMS: dict[str, list[str]] = {
 ESTABLISHED_MAINNET: set[str] = {
     # Confirmed false positives that motivated this (2026-06-20).
     "base", "pendle",
+    # Live mainnet since 2026-07-01; its own pre-launch coverage keeps leaking in (2026-07-20).
+    "robinhood-chain",
     # Obvious live L1s / L2s that routinely ship testnet upgrades — guard against recurrence.
     "ethereum", "arbitrum", "optimism", "polygon", "solana", "avalanche", "bnb-chain",
     "tron", "celo", "starknet", "zksync", "scroll", "linea", "mantle", "blast",
@@ -91,6 +117,24 @@ ESTABLISHED_MAINNET: set[str] = {
     # summary references Arc's public testnet) — that must not flag the whole entity as
     # pre-launch. Circle (USDC issuer, CCTP live since 2023) is definitively live.
     "circle",
+}
+
+# Entity-SELF-reference terms only (never a sub-feature/upgrade name) for the entities we've
+# hand-verified need a positive "this is live" correction (currently the KNOWN_FACTS ∩
+# ESTABLISHED_MAINNET intersection: base, robinhood-chain). Used by
+# ``audit.reverse_modality_violations`` — the mirror of the Arc-direction check, for the
+# Robinhood Chain-direction error (an already-live entity still described as future/planned).
+# Deliberately NOT the same list as TRIGGER_TERMS: Base's TRIGGER_TERMS intentionally includes
+# its own sub-feature names ("beryl upgrade", "b20 token") so the KNOWN_FACTS correction fires
+# when someone writes about them — but those SAME terms legitimately carry future-tense language
+# ("the Beryl upgrade, expected in Q3") and must NOT be flagged as the chain itself being
+# pre-launch. Keep this list to terms that name the entity, never a feature of it.
+ESTABLISHED_MAINNET_SELF_TERMS: dict[str, list[str]] = {
+    "base": ["base chain", "base mainnet", "base network", "base l2", "base layer 2"],
+    "robinhood-chain": [
+        "robinhood chain", "robinhood-chain", "robinhood app chain", "robinhood crypto chain",
+        "rh chain",
+    ],
 }
 
 _LABEL = (

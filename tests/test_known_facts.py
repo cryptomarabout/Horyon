@@ -42,3 +42,21 @@ def test_block_renders_label_and_facts():
     assert out.startswith(kf._LABEL)
     assert "- fact one" in out
     assert "- fact two" in out
+
+
+# Robinhood Chain (2026-07-20 incident): a LIVE mainnet since 2026-07-01 that the model kept
+# describing as something Robinhood merely "plans to" launch — the inverse of the Arc case.
+def test_robinhood_chain_is_established_not_prelaunch():
+    assert "robinhood-chain" in kf.ESTABLISHED_MAINNET
+    assert "robinhood-chain" in kf.KNOWN_FACTS
+
+
+def test_facts_for_slugs_returns_robinhood_chain():
+    assert kf.facts_for_slugs(["robinhood-chain"]) == [kf.KNOWN_FACTS["robinhood-chain"]]
+
+
+def test_facts_for_text_matches_robinhood_chain_variants():
+    # Fires regardless of which fragmented entity name a given article used.
+    for phrase in ("Arcus TVL on Robinhood Chain", "the Robinhood App Chain ecosystem",
+                   "growth on Robinhood Crypto Chain"):
+        assert kf.facts_for_text(phrase) == [kf.KNOWN_FACTS["robinhood-chain"]]

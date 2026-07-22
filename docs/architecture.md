@@ -174,7 +174,7 @@ Twitter thread render → og card cache → audio briefing render — all 3 leng
   (post-digest + 3 h cron) clustering cross-source **signals** into persistent narratives with a **momentum
   state**. Sources: `digest_bullet_analysis` + `podcast_episodes.analysis`. **DAO governance excluded by default**
   (`INCLUDE_GOVERNANCE=False` — bursty + obscure flooded the board). Pipeline: gather (30-day window) → resolve
-  entities (word-boundary vs `entity_memory`) → Ollama-embed → **greedy cluster** (entity overlap primary, cosine
+  entities (word-boundary vs `entity_memory`) → NIM-embed (2048-dim, `input_type="passage"`) → **greedy cluster** (entity overlap primary, cosine
   support; `BROAD_ENTITIES` (bitcoin/ethereum/usdc + DeFi super-connectors **aave/morpho/pendle**) excluded from
   overlap so no mega-cluster) → board-diversity **entity cap** (≤1 narrative per `SEMI_BROAD` versioned slug,
   and per `DOMINANT_PROTOCOLS` aave/morpho/pendle when that protocol is the cluster protagonist in ≥60% of its
@@ -227,6 +227,24 @@ Twitter thread render → og card cache → audio briefing render — all 3 leng
   though it worked on Daily/Research. Both now wire it in: Atlas prioritizes the search panel over node
   selection in its existing `feed-right`; Weekly (a deliberate no-right-panel "solo" report) renders the
   panel only while a search is active.
+- **`digest_updates`** (`app/intraday.py`) — INCREMENTAL intraday follow-ups to the 07:00 daily digest, run
+  at fixed UTC slots (`INTRADAY_SLOTS`, default 13:00 + 19:00) off their own APScheduler crons in `main.py`.
+  One row per `(date, seq)`. Each covers only feed items since `db.get_last_covered_ts(date)` (the latest
+  morning-digest / prior-update `created_at`, floored to `now - INTRADAY_WINDOW_MAX_HOURS`), dedup-prefiltered
+  against today's already-cited URLs, summarized in ONE `llm.complete` call and cleaned through the digest's
+  full guard chain (`sanitize` → `_keep_bullets_only` → `strip_foreign_hrefs` → `_post_filter_duplicates`).
+  Skipped below `INTRADAY_MIN_ITEMS`. `content` is the same Telegram-HTML bullet block as `crypto_digest`, so
+  the web parses it with the same `parseDigest`; the bot sends it to Telegram with a Midday/Evening header. NO
+  heavy post-digest pipeline runs (no narratives/audio/threads/OG). Web reads it (`getDigestUpdates`) →
+  `web_db_role.sql` covers it. Shares `main._digest_lock` so it never overlaps the 07:00 build or a self-heal.
+- **`alerts_sent`** (`app/alerts.py`) — bookkeeping for DETERMINISTIC breaking-news Telegram alerts pushed off
+  the 20-min ingest cycle (`main._maybe_send_alerts`). One row per alerted feed-item link. NO LLM: an alert
+  quotes the item's own title + source + link, so there is no hallucination/modality surface. `find_alertable`
+  scores just-ingested NEWS items with the SAME deterministic `scoring.py` core as the digest
+  (`scoring.score_item` ← shared `_score_item_signals`), requires a real event category + clears
+  `ALERT_MIN_SCORE` (65) with corroboration OR a security hard-trigger (≥ `ALERT_HARD_AMOUNT`), applies a
+  topical exclude (TradFi/price/regulation), dedups same-story via `_same_story` against this table + today's
+  coverage, and obeys per-hour/day rate caps. Bot-only — the web never reads it (alerts are Telegram-only).
 - **`digest_threads`** (`app/threads.py`) — the daily digest as a ready-to-post Twitter/X thread. ONE row per
   date (last step of `orchestrate_post_digest` + CLI). **Intelligence-Brief format: curated TOP-5, NOT one tweet
   per bullet** — `build_thread_for_date` caps `_ordered_bullets` to `OG_CARD_BULLETS` (=5) so the thread mirrors
@@ -383,7 +401,7 @@ Twitter thread render → og card cache → audio briefing render — all 3 leng
   guests/sentiment`). **Map output sanitized to bullets-only** (`_clean_map_note`: strip `<think>`, keep `- `
   lines, drop instruction-echo via `_META_RE`) — a reasoning-model fallback otherwise leaks chain-of-thought into
   the notes → reduce → a stored field. `_parse_analysis` also strips `<think>` before JSON-parse and meta-filters
-  every field. Summary is embedded (768-dim) + run through the shared entity extractor. Recent claims/predictions
+  every field. Summary is embedded (2048-dim, NIM) + run through the shared entity extractor. Recent claims/predictions
   feed the daily digest via `db.get_recent_podcast_summaries(48h)` → `prompts.format_podcast_context`. Channel
   list in `config.PODCAST_CHANNELS` (8 crypto-native channels; unresolvable handles skip non-fatally);
   `config.PODCAST_MIN_DATE` skips old episodes. **Web UI:** podcasts are inline
@@ -511,7 +529,7 @@ Fully standalone — migrated off n8n. Do not reintroduce n8n tables, containers
   entity brief to unwrap planted/hallucinated links, 2026-07-16); replaced per-module copies 2026-07-15 (see
   Conventions "Shared pure primitives"). Contract suite `tests/test_util.py`.
 - `db/` (package) / `embeddings.py` / `memory.py` / `feeds.py` / `telegram_html.py` / `monitor.py` /
-  `backfill_digests.py` — DB pool + all CRUD, Ollama embed (768-dim), per-chat history, ~99 feed sources, HTML
+  `backfill_digests.py` — DB pool + all CRUD, NIM embed (2048-dim, `app/embeddings.py`), per-chat history, ~99 feed sources, HTML
   sanitizer + 4096-char splitter, Flask dashboard, historical digest + analysis backfill.
   **`db/` is a domain-split package** (it grew past 1.7k lines as one file): `_core` holds the connection pool,
   the `_conn` context manager, and the `_fetchall`/`_fetchone`/`_execute` helpers; the domain modules

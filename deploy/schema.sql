@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS feed_items (
     ingested_at  timestamptz NOT NULL DEFAULT now(),
     source_type  text NOT NULL DEFAULT 'twitter',
     metadata     jsonb NOT NULL DEFAULT '{}',
-    embedding    vector(768),
+    embedding    vector(2048),   -- nvidia/nemotron-3-embed-1b (NIM); was 768 (Ollama nomic) pre-2026-07-21
     embed_version smallint NOT NULL DEFAULT 0,
     content_hash text GENERATED ALWAYS AS (md5(content)) STORED,
     mentions     text[] NOT NULL DEFAULT '{}'
@@ -50,8 +50,11 @@ CREATE INDEX IF NOT EXISTS feed_items_content_trgm_idx ON feed_items USING GIN (
 CREATE INDEX IF NOT EXISTS feed_items_effective_date_idx
     ON feed_items (COALESCE(pub_date, ingested_at) DESC);
 
--- ivfflat index: create AFTER initial data load so centroids reflect real data
--- CREATE INDEX feed_items_embedding_idx ON feed_items USING ivfflat (embedding vector_cosine_ops) WITH (lists=100);
+-- NO approximate vector index: nvidia/nemotron-3-embed-1b emits 2048-dim vectors and pgvector's
+-- ivfflat/hnsw indexes cap at 2000 dims, so search_feed does an exact cosine scan (~tens of ms at
+-- this corpus size). `SET LOCAL ivfflat.probes` in search_feed is a harmless no-op without an index.
+-- At much larger scale, switch the column to halfvec(2048) + an hnsw index (indexable to 4000 dims).
+-- (A vector(768) ivfflat index existed pre-2026-07-21; the migration below drops it.)
 
 CREATE TABLE IF NOT EXISTS crypto_cache (
     id            serial PRIMARY KEY,
@@ -353,7 +356,7 @@ CREATE TABLE IF NOT EXISTS podcast_episodes (
     summary         text,
     analysis        jsonb,        -- {tldr, themes, notable_claims, predictions, entities, guests, sentiment}
     model_used      text        NOT NULL DEFAULT '',
-    embedding       vector(768),  -- embed of the summary, not the raw transcript
+    embedding       vector(2048),  -- embed of the summary, not the raw transcript (2048: NIM nemotron-3-embed-1b)
     fetched_at      timestamptz,
     summarized_at   timestamptz,
     error           text,
@@ -398,7 +401,8 @@ CREATE TABLE IF NOT EXISTS narratives (
     watch_next     text[]      NOT NULL DEFAULT '{}',        -- AI "what to watch next" items
     contrarian     text,                                     -- one dissenting/counter signal, if any
     entity_slugs   text[]      NOT NULL DEFAULT '{}',
-    centroid       vector(768),
+    centroid       vector(2048),   -- 2048: NIM nemotron-3-embed-1b (was 768 Ollama nomic); rebuilt fresh each cron
+
     state          text        NOT NULL DEFAULT 'forming',  -- forming|heating|steady|cooling|dormant
     intensity_48h  real,                                    -- R: weighted signal mass, last 48h
     baseline       real,                                    -- B: prior-5d 48h-equivalent mass
@@ -483,3 +487,75 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     notes      text        NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS eval_runs_run_at_idx ON eval_runs (run_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 2026-07-21: embedding provider migration — host Ollama nomic-embed-text (768-dim) →
+-- NVIDIA NIM nvidia/nemotron-3-embed-1b (2048-dim). The two models' vectors are not
+-- comparable AND a 768-dim vector cannot be cast to a 2048 column, so existing embeddings
+-- are NULLed then re-embedded. feed_items re-embeds via the ingest self-heal / a one-shot
+-- `docker exec horyon-bot python3 -m app.reembed`; podcast_episodes.embedding and
+-- narratives.centroid are write-only (never read for similarity) so they simply repopulate at
+-- 2048 on the next summarize / narratives rebuild. The pre-existing vector(768) ivfflat index is
+-- dropped: pgvector ivfflat/hnsw cap at 2000 dims, so 2048 is served by an exact scan.
+-- Guarded on the live column dimension — the whole block is a no-op once already vector(2048).
+DO $$
+BEGIN
+    IF (SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a
+         WHERE a.attrelid = 'feed_items'::regclass AND a.attname = 'embedding') = 'vector(768)' THEN
+        DROP INDEX IF EXISTS feed_items_embedding_idx;
+        UPDATE feed_items SET embedding = NULL WHERE embedding IS NOT NULL;
+        ALTER TABLE feed_items ALTER COLUMN embedding TYPE vector(2048);
+        UPDATE feed_items SET embed_version = 0;   -- force full re-embed at the new EMBED_VERSION
+        RAISE NOTICE 'feed_items.embedding migrated 768 -> 2048 (% rows pending re-embed)',
+                     (SELECT count(*) FROM feed_items);
+    END IF;
+
+    IF (SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a
+         WHERE a.attrelid = 'podcast_episodes'::regclass AND a.attname = 'embedding') = 'vector(768)' THEN
+        UPDATE podcast_episodes SET embedding = NULL WHERE embedding IS NOT NULL;
+        ALTER TABLE podcast_episodes ALTER COLUMN embedding TYPE vector(2048);
+        RAISE NOTICE 'podcast_episodes.embedding migrated 768 -> 2048';
+    END IF;
+
+    IF (SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a
+         WHERE a.attrelid = 'narratives'::regclass AND a.attname = 'centroid') = 'vector(768)' THEN
+        UPDATE narratives SET centroid = NULL WHERE centroid IS NOT NULL;
+        ALTER TABLE narratives ALTER COLUMN centroid TYPE vector(2048);
+        RAISE NOTICE 'narratives.centroid migrated 768 -> 2048';
+    END IF;
+END $$;
+
+-- Intraday digest updates (app/intraday.py — 13:00 + 19:00 UTC crons). The 07:00 daily
+-- digest (crypto_digest) is the canonical morning brief; these are lightweight INCREMENTAL
+-- follow-ups covering only feed items since the last digest/update that day, sent to Telegram
+-- and shown on the web Daily Briefs page as an "Intraday updates" timeline under the brief.
+-- One row per (date, seq); seq is 1-based within the day. `content` is the same cleaned
+-- Telegram-HTML bullet block as crypto_digest.content (parsed by the same parseDigest).
+-- Web READS this table → deploy/web_db_role.sql must be re-run after adding it.
+CREATE TABLE IF NOT EXISTS digest_updates (
+    created_at   timestamptz NOT NULL DEFAULT now() PRIMARY KEY,
+    date         date        NOT NULL,
+    seq          int         NOT NULL DEFAULT 1,      -- 1-based ordinal within the day
+    content      text,                                -- cleaned Telegram-HTML bullet block
+    model_used   text        NOT NULL DEFAULT '',
+    window_start timestamptz,                         -- items since this ts were summarized
+    item_count   int,                                 -- new feed items considered
+    trigger      text        NOT NULL DEFAULT 'cron', -- 'cron' | 'manual'
+    error        text
+);
+CREATE INDEX IF NOT EXISTS digest_updates_date_idx ON digest_updates (date DESC, created_at DESC);
+
+-- Breaking-news alerts already pushed to Telegram (app/alerts.py, off the 20-min ingest
+-- cycle). Deterministic — NO LLM: an alert quotes a feed item's own title + source + link.
+-- One row per alerted feed-item link; drives dedup (never re-alert the same story as more
+-- outlets pick it up) + the per-hour/per-day rate cap. Bot-only (alerts are Telegram-only,
+-- not on the web) → no web_db_role.sql grant needed.
+CREATE TABLE IF NOT EXISTS alerts_sent (
+    link       text        PRIMARY KEY,
+    title      text        NOT NULL DEFAULT '',
+    score      smallint,                         -- 0–100 importance at send time
+    category   text        NOT NULL DEFAULT '',  -- 'security' | 'funding' | 'launch' | 'governance' | ''
+    source_key text        NOT NULL DEFAULT '',  -- scoring.get_source_key(link)
+    sent_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS alerts_sent_sent_at_idx ON alerts_sent (sent_at DESC);

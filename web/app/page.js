@@ -1,5 +1,5 @@
 import { Suspense } from "react";
-import { getLatestDigest, getBulletAnalyses, getBulletTimes, listDigests, getPodcastsForDate, getAudioBriefing, latestDate } from "../lib/db";
+import { getLatestDigest, getBulletAnalyses, getBulletTimes, listDigests, getPodcastsForDate, getAudioBriefing, latestDate, getDigestUpdates } from "../lib/db";
 import { parseDigest, timeAgo, sourceLabel } from "../lib/digest";
 import { buildProjectHints } from "../lib/projects";
 import BulletFeed from "./components/BulletFeed";
@@ -60,12 +60,13 @@ async function HomeFeed() {
   // Wave 2: everything that needs the parsed bullet list. buildProjectHints is now 100% DB
   // (zero external calls) + cached per date, so the entity/category chips are SSR'd into the
   // first paint rather than fetched client-side after hydration.
-  const [bulletAnalyses, bulletTimes, podcasts, audio, hints] = await Promise.all([
+  const [bulletAnalyses, bulletTimes, podcasts, audio, hints, updates] = await Promise.all([
     getBulletAnalyses(d),
     getBulletTimes(bullets.map(b => b.link)),
     getPodcastsForDate(d),
     getAudioBriefing(d),
     buildProjectHints(d, bullets),
+    getDigestUpdates(d),
   ]);
 
   const enrichedBullets = bullets.map(b => ({
@@ -84,6 +85,7 @@ async function HomeFeed() {
       signalsAgo={timeAgo(row.created_at)}
       audio={audio}
       initialHints={hints}
+      updates={updates}
     />
   );
 }

@@ -58,6 +58,9 @@ _EXPLICIT_MERGES = [
     {"ethereum", "ether"},          # 'Ether' (the asset) == Ethereum (junk extraction w/ wrong @ether_fi)
     {"kelp-dao", "kelp"},           # KelpDAO (dao) == Kelp (protocol) — same project, split by type
     {"zcash", "zec"},               # Zcash (protocol) == zec (chain facet) — same coin, split by type
+    {"robinhood-chain", "robinhood-app-chain", "robinhood-crypto-chain"},  # same L2, fragmented
+    # by article phrasing ("Robinhood App Chain" / "Robinhood Crypto Chain" vs "Robinhood Chain");
+    # NOT the same as robinhood-canonical-bridge (a distinct bridge contract, different scope).
     # NB: Ondo's sub-brands (ondo-global-markets, ondo-yield-assets) are DISTINCT
     # DeFiLlama protocols with their own real TVL — do NOT merge them. The "3 Ondo
     # tags" problem is fixed by `dealias` instead (strip their piggyback bare 'ondo'

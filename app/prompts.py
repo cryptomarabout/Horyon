@@ -1480,6 +1480,59 @@ def build_digest_user(tweets: str, previous_analysis: str = "",
     return f"{head}{_DIGEST_RULES}{ctx_block}\n\nINPUT TWEETS:\n{tweets}"
 
 
+# ── Intraday update (app/intraday.py — 13:00 + 19:00 UTC) ───────────────────────
+# A short incremental brief covering only what broke SINCE the morning digest / last update.
+# It reuses _DIGEST_RULES verbatim so every anti-hallucination rail (LINK-verbatim, PRESERVE
+# TEMPORAL MODALITY, em-dash ban, ambiguous-ticker rule, bullets-only) is IDENTICAL to the
+# daily digest — only the bullet count is relaxed downward (this is a top-up, not the full
+# digest). Keep them single-sourced: never fork the rails, only the count.
+INTRADAY_UPDATE_SYSTEM = (
+    "You are a crypto-native analyst writing a short INTRADAY UPDATE for readers who already "
+    "saw this morning's brief. Same scope as the daily digest — onchain DeFi events plus "
+    "crypto/DeFi/web3 funding and M&A, nothing else. Surface ONLY what is genuinely new since "
+    "the last brief. If little of substance broke, write fewer bullets. Never pad."
+)
+
+_INTRADAY_RULES = _DIGEST_RULES.replace(
+    "- 5 to 10 bullets maximum",
+    "- 3 to 6 bullets maximum (this is an incremental update, not the full daily digest)",
+).replace(
+    "- If after filtering fewer than 5 bullets remain, output only what passes — do not pad with low quality content",
+    "- If after filtering fewer than 3 bullets remain, output only what passes — do NOT pad; a short update is fine",
+)
+
+
+def build_intraday_user(tweets: str, covered_bullets: list | None = None) -> str:
+    """User prompt for an intraday update. Mirrors build_digest_user's known_facts + modality
+    injection and its ALREADY COVERED exclusion list, but frames the input as fresh-since-last-
+    brief items and uses the relaxed intraday bullet count."""
+    from . import known_facts, audit
+    context_blocks: list[str] = []
+    facts = known_facts.facts_for_text(tweets)
+    facts += audit.prelaunch_warnings(tweets)
+    kf_block = known_facts.block(facts)
+    if kf_block:
+        context_blocks.append(kf_block)
+    if covered_bullets:
+        lines = [f"  [{b['date']}] {b['title']}" for b in covered_bullets[:60]]
+        context_blocks.append(
+            "⛔ ALREADY COVERED — ABSOLUTE EXCLUSION LIST:\n"
+            "The stories below already appeared in TODAY's morning digest or an earlier intraday "
+            "update. You are FORBIDDEN from writing a bullet about ANY of these again, with NO "
+            "exceptions.\n"
+            "The only bypass: a completely different outcome was confirmed since, with NEW hard "
+            "numbers (e.g. exploit loss revised from $2M to $8M). A follow-up tweet, recap, or "
+            "ongoing development does NOT qualify. If unsure whether an item is about a covered "
+            "story — SKIP IT.\n"
+            + "\n".join(lines)
+        )
+    ctx_block = ("\n\n" + "\n\n".join(context_blocks)) if context_blocks else ""
+    head = ("The items below are fresh crypto posts/articles published SINCE the last brief. "
+            "Extract only NEW, important signals the reader has not seen yet. Then apply every "
+            "rule below.\n")
+    return f"{head}{_INTRADAY_RULES}{ctx_block}\n\nINPUT ITEMS:\n{tweets}"
+
+
 # --------------------------------------------------------------------------- #
 # Podcast transcript analysis (map-reduce over YouTube auto-captions)
 # --------------------------------------------------------------------------- #

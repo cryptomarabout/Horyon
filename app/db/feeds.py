@@ -152,20 +152,22 @@ def count_missing_embeddings() -> int:
 def _embed_batch(batch: list[tuple]) -> int:
     """Embed cleaned content for (id, content) rows, then store.
 
-    Embeddings (slow network calls) run with NO DB connection held; only the
-    UPDATEs take a connection. Returns rows updated.
+    Embeddings run in ONE batched /embeddings request per EMBED_BATCH_SIZE chunk (no DB
+    connection held); only the UPDATEs take a connection. Stored corpus embeds as PASSAGE.
+    A whole-batch API failure (after in-call retries) is swallowed so the run continues — the
+    rows stay NULL and re-embed on the next ingest self-heal cycle. Returns rows updated.
     """
-    updates: list[tuple] = []
-    for row_id, content in batch:
-        text = embeddings.clean_for_embedding(content)
-        if not text:
-            continue
-        try:
-            vec = embeddings.embed(text)
-        except Exception:
-            log.exception("embedding failed for feed_items.id=%s", row_id)
-            continue
-        updates.append((_vec_literal(vec), embeddings.EMBED_VERSION, row_id))
+    cleaned = [(row_id, embeddings.clean_for_embedding(content)) for row_id, content in batch]
+    rows = [(row_id, text) for row_id, text in cleaned if text]
+    if not rows:
+        return 0
+    try:
+        vecs = embeddings.embed_batch([text for _, text in rows], input_type=embeddings.PASSAGE)
+    except Exception:
+        log.exception("embedding batch failed for %d rows (will retry next cycle)", len(rows))
+        return 0
+    updates = [(_vec_literal(vec), embeddings.EMBED_VERSION, row_id)
+               for (row_id, _), vec in zip(rows, vecs)]
     if not updates:
         return 0
     with _conn() as conn, conn.cursor() as cur:
@@ -302,6 +304,55 @@ def get_feed_items_since(days: int, limit: int = 40000) -> list[dict]:
     )
 
 
+def get_feed_items_since_ts(since_ts, limit: int = 200) -> list[dict]:
+    """Feed items whose effective publication time (COALESCE(pub_date, ingested_at)) is
+    at or after `since_ts` — the intraday-update window (app/intraday.py). Same column
+    shape as get_recent_feed_items so digest._format_items can consume it directly.
+
+    NOT to be confused with get_feed_items_since(days, ...) above, which takes a day count
+    and returns a lean content+ts shape for the entity graph.
+    """
+    where = "COALESCE(pub_date, ingested_at) >= %s"
+    order = "ORDER BY COALESCE(pub_date, ingested_at) DESC LIMIT %s"
+    return _fetchall_quality(
+        f"""
+        SELECT content, link, creator, pub_date, source_type,
+               COALESCE(quality_flag, 'ok') AS quality_flag
+        FROM feed_items WHERE {where} {order}
+        """,
+        f"SELECT content, link, creator, pub_date, source_type FROM feed_items WHERE {where} {order}",
+        (since_ts, limit),
+    )
+
+
+def get_recent_unalerted_items(minutes: int, max_age_hours: int = 48,
+                               limit: int = 400) -> list[dict]:
+    """Feed items ingested in the last `minutes` minutes that have NOT already been alerted
+    (app/alerts.py, off the 20-min ingest cycle). Anti-joined against alerts_sent on the
+    (already-normalized) link. `max_age_hours` also drops re-syndicated stale content whose
+    pub_date is old even though it was just ingested — breaking-news alerts want fresh events.
+
+    Returns title/content/link/creator/source_type/quality_flag plus the effective `ts`.
+    """
+    return _fetchall(
+        """
+        SELECT f.title, f.content, f.link, f.creator, f.source_type,
+               COALESCE(f.quality_flag, 'ok') AS quality_flag,
+               COALESCE(f.pub_date, f.ingested_at) AS ts
+        FROM feed_items f
+        LEFT JOIN alerts_sent a ON a.link = f.link
+        WHERE a.link IS NULL
+          AND f.ingested_at >= now() - make_interval(mins => %s)
+          AND COALESCE(f.pub_date, f.ingested_at) >= now() - make_interval(hours => %s)
+          AND f.content IS NOT NULL AND f.content <> ''
+        ORDER BY COALESCE(f.pub_date, f.ingested_at) DESC
+        LIMIT %s
+        """,
+        (minutes, max_age_hours, limit),
+        dict_rows=True,
+    )
+
+
 def get_source_ingestion_counts() -> list[tuple]:
     """Items ingested per source, derived from feed item links.
 
@@ -423,7 +474,8 @@ def search_feed(keyword: str, topk: int | None = None, days: int | None = None) 
     """
     topk = topk or config.SEARCH_TOPK
     days = days or config.SEARCH_WINDOW_DAYS
-    qvec = _vec_literal(embeddings.embed(embeddings.clean_for_embedding(keyword) or keyword))
+    qvec = _vec_literal(embeddings.embed(embeddings.clean_for_embedding(keyword) or keyword,
+                                         input_type=embeddings.QUERY))
 
     def _run(quality_filter: str) -> list[dict]:
         with _conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:

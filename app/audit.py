@@ -188,6 +188,40 @@ def modality_violations(text: str, patterns: dict[str, "re.Pattern"]) -> list[tu
     return hits
 
 
+def compile_established_self_patterns() -> dict[str, "re.Pattern"]:
+    """slug -> compiled word-boundary alternation over an ESTABLISHED_MAINNET entity's
+    SELF-reference terms only (never a sub-feature name — see ``ESTABLISHED_MAINNET_SELF_TERMS``
+    docstring)."""
+    return {
+        slug: re.compile(r"(?<!\w)(?:" + "|".join(re.escape(t) for t in terms) + r")(?!\w)", re.I)
+        for slug, terms in known_facts.ESTABLISHED_MAINNET_SELF_TERMS.items() if terms
+    }
+
+
+def reverse_modality_violations(text: str, patterns: dict | None = None) -> list[tuple[str, str]]:
+    """Sentence-level: return [(slug, sentence)] where a hand-verified LIVE entity (the KNOWN_FACTS
+    ∩ ESTABLISHED_MAINNET set — currently base, robinhood-chain) is described with future/planned
+    language and no live qualifier in the same sentence.
+
+    The mirror of ``modality_violations``: that catches a pre-launch entity called live (the Arc
+    case). This catches the OPPOSITE — an already-live entity still called pre-launch/future (the
+    Robinhood Chain case, 2026-07-20: 'a network Robinhood has signaled plans to expand beyond its
+    brokerage model', describing a chain that had been live for three weeks with $1B+ DEX volume).
+    Deliberately scoped to the tiny hand-curated self-term set (not all ESTABLISHED_MAINNET, and
+    not KNOWN_FACTS' TRIGGER_TERMS) to keep false positives near zero — a live chain's OWN upcoming
+    upgrade/feature is still correctly described in future tense, and must not trip this."""
+    patterns = patterns if patterns is not None else compile_established_self_patterns()
+    hits: list[tuple[str, str]] = []
+    for sent in _SENT_SPLIT.split(text or ""):
+        if not _FUTURE_RE.search(sent) or _LIVE_RE.search(sent):
+            continue
+        for slug, pat in patterns.items():
+            if pat.search(sent):
+                hits.append((slug, sent.strip()[:200]))
+                break
+    return hits
+
+
 def prelaunch_warnings(text: str, exclude_curated: bool = True) -> list[str]:
     """Generic 'this entity is pre-launch — preserve modality' lines for any self-declared
     testnet/upcoming entity mentioned in ``text``. Curated known_facts entities are excluded
@@ -218,6 +252,18 @@ def check_modality(surfaces) -> list[dict]:
     findings = []
     for kind, key, text in surfaces:
         for slug, sent in modality_violations(text, pats):
+            findings.append({"kind": kind, "key": key, "slug": slug, "sentence": sent})
+    return findings
+
+
+def check_reverse_modality(surfaces) -> list[dict]:
+    """Sentence-level: a hand-verified LIVE entity described as future/planned (the Robinhood
+    Chain-direction mirror of ``check_modality``). Informational — the curated self-term set is
+    small and new; report it for review rather than gate deploys on it until it has a track record."""
+    pats = compile_established_self_patterns()
+    findings = []
+    for kind, key, text in surfaces:
+        for slug, sent in reverse_modality_violations(text, pats):
             findings.append({"kind": kind, "key": key, "slug": slug, "sentence": sent})
     return findings
 
@@ -451,6 +497,7 @@ def apply_fixes(modality, junk, generic) -> dict:
 def run(do_fix: bool = False, quiet: bool = False) -> int:
     surfaces = _gather_surfaces()
     modality = check_modality(surfaces)
+    reverse_modality = check_reverse_modality(surfaces)
     overstate = check_overstatement(surfaces)
     leaks = check_reasoning_leak(surfaces)
     threadlinks = check_thread_links(surfaces)
@@ -469,6 +516,12 @@ def run(do_fix: bool = False, quiet: bool = False) -> int:
         for f in by_kind.get(kind, []):
             P(f"  ❌ [{kind}] {f['key']}  (entity={f['slug']})")
             P(f"        {f['sentence']}")
+
+    P(f"\n[REVERSE MODALITY] hand-verified live entity described as future/planned — "
+      f"{len(reverse_modality)} hit(s)")
+    for f in reverse_modality:
+        P(f"  ⚠️  [{f['kind']}] {f['key']}  (entity={f['slug']})")
+        P(f"        {f['sentence']}")
 
     P(f"\n[OVERSTATE] hype / editorializing language — {len(overstate)} hit(s)")
     for f in overstate[:25]:
@@ -555,7 +608,8 @@ def run(do_fix: bool = False, quiet: bool = False) -> int:
 
     total = len(modality) + len(threadlinks) + len(leaks)
     P("\n" + "=" * 70)
-    P(f"SUMMARY: {len(modality)} modality · {len(overstate)} overstatement · "
+    P(f"SUMMARY: {len(modality)} modality · {len(reverse_modality)} reverse-modality · "
+      f"{len(overstate)} overstatement · "
       f"{len(leaks)} reasoning-leak · {len(threadlinks)} threadlink · {len(junk)} junk-alias · "
       f"{len(cross_type)} cross-type · {len(collisions)} collision-risk")
     return total

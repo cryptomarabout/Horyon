@@ -109,13 +109,43 @@ ALLOWED_CHAT_IDS = _csv_ints("TELEGRAM_ALLOWED_CHAT_IDS")
 # --- Postgres ---
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://crypto:crypto@localhost:5433/crypto")
 
-# --- Ollama ---
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
-EMBED_DIMS = 768  # nomic-embed-text
+# --- Embeddings (NVIDIA NIM primary → OpenRouter fallback, OpenAI-compatible /embeddings) ---
+# Migrated off host Ollama (nomic-embed-text, 768-dim) 2026-07-21. nvidia/nemotron-3-embed-1b
+# emits a FIXED 2048-dim vector (no Matryoshka truncation — the API rejects any other
+# `dimensions`) and is ASYMMETRIC: stored documents embed with input_type="passage", search
+# queries with input_type="query" (see embeddings.py). Primary creds/base default to the NIM chat
+# provider but are independently overridable.
+EMBED_MODEL = os.getenv("EMBED_MODEL", "nvidia/nemotron-3-embed-1b")
+EMBED_DIMS = _int("EMBED_DIMS", 2048)  # nvidia/nemotron-3-embed-1b — must match the vector() column
+EMBED_BASE_URL = os.getenv("EMBED_BASE_URL", NIM_BASE_URL)
+EMBED_API_KEY = os.getenv("EMBED_API_KEY", NIM_API_KEY)
+EMBED_BATCH_SIZE = _int("EMBED_BATCH_SIZE", 64)   # inputs per /embeddings call (100 verified OK)
+EMBED_TIMEOUT_SEC = _float("EMBED_TIMEOUT_SEC", 60.0)
+EMBED_MAX_RETRIES = _int("EMBED_MAX_RETRIES", 4)  # full provider-chain rounds before giving up
+EMBED_RETRY_BASE_SEC = _float("EMBED_RETRY_BASE_SEC", 2.0)  # exponential backoff between rounds
+# Fallback provider — the SAME model on a different host, tried when the primary rate-limits/errors.
+# OpenRouter serves it as `nvidia/nemotron-3-embed-1b:free` (verified 2026-07-21: 2048-dim, honors
+# input_type, vectors numerically IDENTICAL to NIM — cos 1.0000 — so mixing providers in one column
+# is safe). Empty EMBED_FALLBACK_MODEL disables the fallback. NOTE: OpenRouter's bare id 404s; the
+# `:free` suffix is required there.
+EMBED_FALLBACK_MODEL = os.getenv("EMBED_FALLBACK_MODEL", "nvidia/nemotron-3-embed-1b:free")
+EMBED_FALLBACK_BASE_URL = os.getenv("EMBED_FALLBACK_BASE_URL", OPENROUTER_BASE_URL)
+EMBED_FALLBACK_API_KEY = os.getenv("EMBED_FALLBACK_API_KEY", OPENROUTER_API_KEY)
 
 # --- Tunables ---
 INGEST_INTERVAL_MIN = _int("INGEST_INTERVAL_MIN", 20)
+# Per-feed HTTP fetch timeout. feedparser's own urllib fetch has NO timeout (OS default ≈130s
+# of SYN retries), so a firewalled host made each dead source stall a pool slot for minutes and
+# pushed whole ingest cycles past their 20-min interval (2026-07-22 nitter incident).
+FEED_FETCH_TIMEOUT_SEC = _float("FEED_FETCH_TIMEOUT_SEC", 20.0)
+# Anti-scraper etiquette for nitter.net (ALL Twitter sources ride that single host): fetch only
+# 1/NITTER_SHARDS of the handles per cycle (deterministic time-based round-robin — every handle
+# still polled every SHARDS×INGEST_INTERVAL_MIN minutes) at low concurrency. A full 115-handle
+# burst every 20 min tripped nitter's firewall on 2026-07-21 (SYN-drop ban; each full burst
+# after a ban lapse instantly re-banned us — see docs/conventions.md). 1 shard restores the old
+# everything-every-cycle behavior.
+NITTER_SHARDS = _int("NITTER_SHARDS", 3)
+NITTER_FETCH_CONCURRENCY = _int("NITTER_FETCH_CONCURRENCY", 3)
 SEARCH_TOPK = _int("SEARCH_TOPK", 40)
 SEARCH_WINDOW_DAYS = _int("SEARCH_WINDOW_DAYS", 30)
 # ivfflat recall knob. lists=100 on the index → ~sqrt(100)=10 is a sane floor;
@@ -354,6 +384,61 @@ BRIEFING_VARIANTS = ("short", "standard", "explainer")
 # 2026-07-15 "no Deep Dive until 10:58" incident. 180s covers the worst case with headroom while
 # still letting a genuinely hung model fall through.
 BRIEFING_LLM_TIMEOUT_SEC = _float("BRIEFING_LLM_TIMEOUT_SEC", 180.0)
+
+# --- Intraday digest updates (see app/intraday.py) ---
+# The 07:00 UTC daily digest is the canonical morning brief; these are lightweight
+# INCREMENTAL follow-ups run at fixed slots later in the day (default 13:00 + 19:00 UTC),
+# covering only feed items since the last digest/update. Sent to Telegram AND shown on the
+# web Daily Briefs as an "Intraday updates" timeline. No heavy post-digest pipeline (no
+# narratives rebuild / audio / threads / OG) — just one LLM summarize call + persist.
+INTRADAY_UPDATES_ENABLED = os.getenv("INTRADAY_UPDATES_ENABLED", "1").strip().lower() not in ("0", "false", "no", "")
+# UTC hours (comma-separated) at which the intraday update cron fires. Keep clear of the
+# 07:00 daily digest and its post-pipeline. Default: midday + evening.
+INTRADAY_SLOTS = os.getenv("INTRADAY_SLOTS", "13,19")
+# Skip an update entirely if fewer than this many NEW (since-last-update, non-duplicate)
+# feed items are available — avoids shipping a thin/empty "update".
+INTRADAY_MIN_ITEMS = _int("INTRADAY_MIN_ITEMS", 4)
+# Cap the look-back window: since_ts is floored to now - this many hours, so a long outage
+# (or the first slot after a quiet night) can't balloon the item set into a full re-digest.
+INTRADAY_WINDOW_MAX_HOURS = _int("INTRADAY_WINDOW_MAX_HOURS", 12)
+# Max items fed to the intraday summarize prompt (keeps the context lean and cheap).
+INTRADAY_ITEM_LIMIT = _int("INTRADAY_ITEM_LIMIT", 80)
+
+# --- Breaking-news Telegram alerts (see app/alerts.py) ---
+# Off the 20-min ingest cycle, newly-ingested feed items are scored with the deterministic
+# app/scoring.py signals; the alert-worthy ones are pushed to Telegram immediately. NO LLM —
+# an alert quotes the item's own title + source + link. Telegram-only (not on the web).
+ALERTS_ENABLED = os.getenv("ALERTS_ENABLED", "1").strip().lower() not in ("0", "false", "no", "")
+# Alert on NEWS-source items only (real editorial headlines, one topic each). Twitter/nitter
+# items carry the whole post as their "title" and are multi-topic + number-heavy, which makes
+# deterministic scoring noisy — so they are excluded from alerts by default (they still feed
+# the digest). Set to 0/false to also consider tweets (expect lower precision).
+ALERT_NEWS_ONLY = os.getenv("ALERT_NEWS_ONLY", "1").strip().lower() not in ("0", "false", "no", "")
+# Importance-score floor (0–100) for a NON-hard-trigger item to alert. Hard triggers
+# (security events with a large $ amount) bypass this. Calibrated on 12h of live news
+# (2026-07-21): clearly-important, heavily-corroborated stories (a major merger collapse, a
+# flagship L2 product launch) scored 68–69 while routine listings/partnerships sat ≤61, so 65
+# is the "balanced" line — it fires on the real news and stays quiet on the rest.
+ALERT_MIN_SCORE = _int("ALERT_MIN_SCORE", 65)
+# Non-hard-trigger alerts also require corroboration: this many distinct credible sources,
+# OR a single premium (Kaiko / Tier-1 ≥ this credibility) source. Blocks single-clickbait alerts.
+ALERT_MIN_SOURCES = _int("ALERT_MIN_SOURCES", 2)
+ALERT_PREMIUM_CREDIBILITY = _float("ALERT_PREMIUM_CREDIBILITY", 1.2)
+# Hard trigger: a security-category item (hack/exploit/drain/breach) whose own text carries a
+# $-magnitude ≥ this alerts regardless of score/corroboration — real theft is never buried.
+ALERT_HARD_AMOUNT = _float("ALERT_HARD_AMOUNT", 50_000_000.0)
+# Rate caps (counted from alerts_sent) so a noisy news window can't spam the chat.
+ALERT_MAX_PER_HOUR = _int("ALERT_MAX_PER_HOUR", 4)
+ALERT_MAX_PER_DAY = _int("ALERT_MAX_PER_DAY", 12)
+# Don't re-alert a story that's semantically-duplicate to one alerted within this many hours
+# (as more outlets pick it up). Also skips items already in today's digest/updates.
+ALERT_DEDUP_HOURS = _int("ALERT_DEDUP_HOURS", 36)
+# How far back the ingest-cycle scan looks for unalerted items (minutes). A little more than
+# INGEST_INTERVAL_MIN so a slightly late cycle never misses an item; alerts_sent dedups anyway.
+ALERT_SCAN_MINUTES = _int("ALERT_SCAN_MINUTES", 30)
+# Optional quiet hours (comma-separated UTC hours, e.g. "0,1,2,3,4,5") during which alerts are
+# suppressed. Empty = alert around the clock. Suppressed items are NOT re-alerted later.
+ALERT_QUIET_HOURS_UTC = os.getenv("ALERT_QUIET_HOURS_UTC", "")
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 

@@ -13,6 +13,7 @@ from .feeds import (
     insert_feed_items, existing_links, record_ingest_run, update_source_health,
     count_missing_embeddings, embed_missing, reembed_stale, count_stale_embeddings,
     get_recent_feed_items, get_feed_items_for_date, get_feed_items_since,
+    get_feed_items_since_ts, get_recent_unalerted_items,
     get_source_ingestion_counts, get_chronic_failing_sources,
     get_feed_items_matching_terms, search_feed, get_kaiko_feed_signals,
 )
@@ -20,6 +21,7 @@ from .digest import (
     get_cache, set_cache, insert_digest, record_keyword_analysis, get_digest,
     get_digest_attempts, get_recent_digests, get_recent_keyword_analyses,
     get_recent_digests_text, get_digest_contents_for_dedup, get_digests_for_range,
+    insert_digest_update, get_digest_updates, get_last_covered_ts,
 )
 from .protocols import (
     upsert_tvl, get_latest_tvl, get_chain_tvl_for_week, upsert_protocols,
@@ -69,4 +71,7 @@ from .narratives import (
 )
 from .evals import (
     insert_eval_results, get_eval_batches,
+)
+from .alerts import (
+    insert_alerts_sent, get_recent_alerts, count_alerts_since,
 )

@@ -115,22 +115,30 @@ def fetch_source(url: str) -> dict:
 
     ``{url, ok, status, item_count, items, error}`` — ``ok`` is False on transport
     errors, HTTP >= 400, or an unparseable feed with no entries.
+
+    The HTTP fetch is done with urllib + an EXPLICIT timeout, then the bytes are handed
+    to feedparser. feedparser.parse(url) fetches with NO timeout (OS default ≈130s of SYN
+    retries), so during the 2026-07-22 nitter firewall ban every dead source pinned a pool
+    slot for minutes and ingest cycles blew past their 20-min interval.
     """
+    import urllib.request as _urlreq
     try:
-        parsed = feedparser.parse(url, agent=_UA)
+        req = _urlreq.Request(url, headers={"User-Agent": _UA})
+        with _urlreq.urlopen(req, timeout=config.FEED_FETCH_TIMEOUT_SEC) as resp:
+            status = resp.getcode()
+            body = resp.read()
+        parsed = feedparser.parse(body)
     except Exception as exc:
-        log.warning("feed fetch failed: %s", url)
+        # urllib raises HTTPError for >=400, URLError for transport failures — both land here.
+        log.warning("feed fetch failed: %s (%s)", url, str(exc)[:120])
         return {"url": url, "ok": False, "status": None, "item_count": 0,
                 "items": [], "error": str(exc)[:300]}
 
-    status = parsed.get("status")
     entries = parsed.entries or []
     error = None
     if parsed.get("bozo") and not entries:
         exc = parsed.get("bozo_exception")
         error = str(exc)[:300] if exc else "unparseable feed"
-    elif status is not None and status >= 400:
-        error = f"HTTP {status}"
 
     items = [{
         "link": e.get("link") or "",
@@ -145,10 +153,51 @@ def fetch_source(url: str) -> dict:
             "item_count": len(entries), "items": items, "error": error}
 
 
-def fetch_all() -> list[dict]:
-    """Fetch every source concurrently; returns per-source outcome dicts."""
+def _split_sources(sources: list[str]) -> tuple[list[str], list[str]]:
+    """(nitter_sources, other_sources) — every Twitter handle rides the single nitter.net host."""
+    nitter = [u for u in sources if "nitter.net/" in u]
+    other = [u for u in sources if "nitter.net/" not in u]
+    return nitter, other
+
+
+def nitter_shard(nitter_sources: list[str], now: datetime | None = None) -> list[str]:
+    """The subset of nitter sources to fetch THIS cycle.
+
+    Deterministic time-based round-robin: shard index = the current ingest-interval slot
+    mod NITTER_SHARDS, so consecutive cycles walk the shards in order with no stored state
+    and every handle is polled every NITTER_SHARDS × INGEST_INTERVAL_MIN minutes. A full
+    115-handle burst every cycle tripped nitter.net's anti-scraper firewall on 2026-07-21
+    (SYN-drop ban; each full burst after a ban lapse re-banned the IP instantly).
+    NITTER_SHARDS=1 restores the fetch-everything-every-cycle behavior.
+    """
+    shards = max(1, config.NITTER_SHARDS)
+    if shards == 1 or not nitter_sources:
+        return nitter_sources
+    now = now or datetime.now(timezone.utc)
+    idx = int(now.timestamp() // (config.INGEST_INTERVAL_MIN * 60)) % shards
+    return nitter_sources[idx::shards]
+
+
+def fetch_all(now: datetime | None = None) -> list[dict]:
+    """Fetch this cycle's sources concurrently; returns per-source outcome dicts.
+
+    News/API sources are fetched every cycle (10 workers, as before). Nitter sources are
+    sharded across cycles (see nitter_shard) and fetched at NITTER_FETCH_CONCURRENCY so the
+    single nitter.net host never sees a scraper-shaped burst from this IP again. Sources not
+    in this cycle's shard are simply absent from the results (source_health rows untouched).
+    """
+    nitter, other = _split_sources(SOURCES)
+    shard = nitter_shard(nitter, now)
+    if len(shard) < len(nitter):
+        log.info("ingest: nitter shard %d/%d handles this cycle (%d shards)",
+                 len(shard), len(nitter), max(1, config.NITTER_SHARDS))
+    results: list[dict] = []
     with ThreadPoolExecutor(max_workers=10) as pool:
-        return list(pool.map(fetch_source, SOURCES))
+        results += list(pool.map(fetch_source, other))
+    if shard:
+        with ThreadPoolExecutor(max_workers=max(1, config.NITTER_FETCH_CONCURRENCY)) as pool:
+            results += list(pool.map(fetch_source, shard))
+    return results
 
 
 def clean_items(raws: list[dict]) -> list[dict]:

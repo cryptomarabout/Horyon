@@ -3,22 +3,22 @@
 import { useState } from "react";
 import { fmtTvl } from "../../lib/format";
 
-// ── Price formatter — "1,234 $" market-bar style (differs from panel's "$1.2K") ──
+// ── Price formatter — "$1,234" market-bar style (differs from panel's "$1.2K") ──
 // Prices ≥ $1,000 (BTC, ETH) render without decimals.
 function fmtPrice(usd) {
   if (usd == null) return null;
   const decimals = usd >= 1000 ? 0 : 1;
-  return new Intl.NumberFormat("en-US", {
+  return "$" + new Intl.NumberFormat("en-US", {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
-  }).format(usd) + " $";
+  }).format(usd);
 }
 
-// Compact (mobile) price — BTC collapses thousands to "k" (104,231 → "104k $");
+// Compact (mobile) price — BTC collapses thousands to "k" (104,231 → "$104k");
 // everything else falls back to the full formatter.
 function fmtPriceCompact(sym, usd) {
   if (usd == null) return null;
-  if (sym === "BTC" && usd >= 1000) return `${Math.round(usd / 1000)}k $`;
+  if (sym === "BTC" && usd >= 1000) return `$${Math.round(usd / 1000)}k`;
   return fmtPrice(usd);
 }
 

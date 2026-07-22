@@ -25,6 +25,17 @@ export function timeAgo(isoStr) {
   } catch { return null; }
 }
 
+// Human label for an intraday update from its created_at UTC hour (mirrors the Telegram
+// header in app/main._intraday_slot_label). The stored timestamp is rendered UTC
+// (to_char over a timestamptz in a UTC session), so the hour is chars 11-13 of the ISO string.
+export function updateSlotLabel(isoStr) {
+  const h = Number((isoStr || "").slice(11, 13));
+  if (Number.isNaN(h)) return "Intraday update";
+  if (h >= 11 && h <= 15) return "Midday update";
+  if (h >= 16 && h <= 22) return "Evening update";
+  return "Intraday update";
+}
+
 export const DOMAIN_NAMES = {
   "cointelegraph.com": "CoinTelegraph", "coindesk.com": "CoinDesk",
   "theblock.co": "The Block", "decrypt.co": "Decrypt",

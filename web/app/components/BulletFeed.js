@@ -10,6 +10,7 @@ import SortToggle from "./SortToggle";
 import FeedList from "./FeedList";
 import EmptyState from "./ui/EmptyState";
 import DesignLegend from "./DesignLegend";
+import IntradayUpdates from "./IntradayUpdates";
 import useMobilePanelBack from "../../lib/useMobilePanelBack";
 import useSwipeNav from "../../lib/useSwipeNav";
 import useFeedSearch from "../../lib/useFeedSearch";
@@ -28,7 +29,7 @@ import useFeedKeyboardNav from "../../lib/useFeedKeyboardNav";
 export default function BulletFeed({
   bullets, analyses = {}, podcasts = [],
   items = [], currentDate, signalsAgo,
-  audio = null, initialHints = null,
+  audio = null, initialHints = null, updates = [],
 }) {
   const [selected, setSelected] = useState(null);
   const [panelOpen, setPanelOpen] = useState(false);
@@ -213,6 +214,8 @@ export default function BulletFeed({
               <DesignLegend />
             </div>
           </div>
+
+          <IntradayUpdates updates={updates} />
 
           {entries.length === 0 ? (
             <EmptyState variant="feed" glyph="◷">No items match the current filters.</EmptyState>

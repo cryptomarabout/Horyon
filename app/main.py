@@ -61,6 +61,13 @@ async def _ingest_job() -> None:
     except Exception:
         log.warning("ingest: audio self-heal check failed (non-fatal)", exc_info=True)
 
+    # Breaking-news alerts: score the items just ingested and push any that clear the balanced
+    # threshold to Telegram (deterministic, no LLM). Best-effort, never fatal.
+    try:
+        await _maybe_send_alerts()
+    except Exception:
+        log.warning("ingest: breaking-news alert check failed (non-fatal)", exc_info=True)
+
 
 async def _send_audio_briefing(app: Application) -> None:
     """Send today's audio briefing to each allowed chat, if one was rendered. Best-effort: a
@@ -185,6 +192,75 @@ async def _maybe_heal_audio() -> None:
         await _send_audio_briefing(_app)
 
 
+async def _maybe_send_alerts() -> None:
+    """Breaking-news alerts off the 20-min ingest cycle (deterministic — no LLM). Scores the
+    cycle's unalerted feed items, sends the alert-worthy ones to every allowed chat, then
+    records them so they can never re-alert. Gated by config.ALERTS_ENABLED. Best-effort:
+    the caller swallows errors, and an item is only recorded once at least one send succeeds."""
+    from . import alerts
+    if not config.ALERTS_ENABLED or _app is None:
+        return
+    found = await asyncio.to_thread(alerts.find_alertable)
+    if not found:
+        return
+    sent: list[dict] = []
+    for a in found:
+        html = alerts.format_alert(a)
+        delivered = False
+        for chat_id in config.ALLOWED_CHAT_IDS:
+            try:
+                await _app.bot.send_message(
+                    chat_id, html,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                delivered = True
+            except TelegramError:
+                log.exception("failed to send alert to chat_id=%s", chat_id)
+        if delivered:
+            sent.append(a)
+    if sent:
+        await asyncio.to_thread(lambda: alerts.mark_alerted(sent))
+        log.info("alerts: sent %d breaking-news alert(s)", len(sent))
+
+
+def _parse_intraday_slots(raw: str) -> list[int]:
+    """Parse config.INTRADAY_SLOTS ('13,19') into a sorted list of valid UTC hours."""
+    out: list[int] = []
+    for tok in (raw or "").split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            h = int(tok)
+            if 0 <= h <= 23 and h not in out:
+                out.append(h)
+    return sorted(out)
+
+
+def _intraday_slot_label(hour: int) -> str:
+    if 11 <= hour <= 15:
+        return "🕐 <b>Midday Update</b>"
+    if 16 <= hour <= 22:
+        return "🌆 <b>Evening Update</b>"
+    return "🕐 <b>Intraday Update</b>"
+
+
+async def _send_intraday_message(app: Application, body: str, now: datetime) -> None:
+    """Send an intraday update body to every allowed chat with a slot-aware header."""
+    header = _intraday_slot_label(now.hour)
+    html = f"{header}\n\n{body}\n\n<i>full feed → {config.PUBLIC_BASE_URL}</i>"
+    chunks = split_message(html) or ["(empty update)"]
+    for chat_id in config.ALLOWED_CHAT_IDS:
+        try:
+            for chunk in chunks:
+                await app.bot.send_message(
+                    chat_id, chunk,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+        except TelegramError:
+            log.exception("failed to send intraday update to chat_id=%s", chat_id)
+
+
 async def _post_init(app: Application) -> None:
     global _scheduler, _app
     _app = app
@@ -250,6 +326,42 @@ async def _post_init(app: Application) -> None:
         max_instances=1,
         coalesce=True,
     )
+
+    async def _intraday_update_cron() -> None:
+        """Lightweight INCREMENTAL update at a fixed slot (default 13:00 + 19:00 UTC): summarize
+        only feed items since the morning digest / last update, send a short Telegram message,
+        and store a digest_updates row for the web timeline. No heavy post-digest pipeline.
+        Shares _digest_lock so it never overlaps the 07:00 build or a self-heal retry."""
+        from . import intraday
+        if not config.INTRADAY_UPDATES_ENABLED:
+            return
+        now = datetime.now(timezone.utc)
+        if _digest_lock.locked():
+            log.info("intraday: a digest build is in progress — skipping the %02d:00 slot", now.hour)
+            return
+        log.info("intraday update cron starting (%02d:00 UTC)", now.hour)
+        async with _digest_lock:
+            try:
+                res = await asyncio.to_thread(lambda: intraday.build_intraday_update(now))
+            except Exception:
+                log.exception("intraday update generation failed")
+                return
+        if res is None:
+            log.info("intraday: nothing new enough to send this slot")
+            return
+        await _send_intraday_message(app, res["body"], now)
+
+    if config.INTRADAY_UPDATES_ENABLED:
+        for _slot in _parse_intraday_slots(config.INTRADAY_SLOTS):
+            _scheduler.add_job(
+                _intraday_update_cron,
+                "cron",
+                hour=_slot,
+                minute=0,
+                id=f"intraday_update_{_slot:02d}",
+                max_instances=1,
+                coalesce=True,
+            )
 
     async def _entity_hygiene_cron() -> None:
         """Nightly self-heal of entity_memory (strip bad aliases, merge dupes, dealias

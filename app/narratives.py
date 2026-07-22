@@ -7,7 +7,7 @@ Pipeline (full rebuild, run post-digest + on a cron):
        podcast     — podcast_episodes.analysis (notable_claims / predictions)
        governance  — governance_proposals
   2. Resolve entities per signal (word-boundary match vs entity_memory).
-  3. Embed each signal (Ollama, 768-dim) and greedily cluster by
+  3. Embed each signal (NIM, 2048-dim, input_type="passage") and greedily cluster by
        entity overlap (primary) + embedding cosine (support).
   4. Compute momentum per cluster (mass = importance/100, windows anchored to a
        reference time — mirrors app/scoring.py).
@@ -549,19 +549,21 @@ def _mass(sig: dict) -> float:
 
 # ── Clustering ───────────────────────────────────────────────────────────────
 def _embed_signals(signals: list[dict]) -> None:
-    """Attach a 768-dim vector to each signal (best-effort, parallel)."""
-    def _one(s: dict) -> None:
-        try:
-            s["vec"] = embeddings.embed(embeddings.clean_for_embedding(s["text"]) or s["text"])
-        except Exception:
-            s["vec"] = None
+    """Attach a 2048-dim vector to each signal (best-effort, one batched call).
+
+    Signals are stored/clustered corpus, so they embed as PASSAGE (internally consistent — cluster
+    centroids are only ever compared against other signal vectors, never against a live query).
+    """
+    for s in signals:
+        s["vec"] = None
+    texts = [embeddings.clean_for_embedding(s["text"]) or s["text"] for s in signals]
     try:
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            list(pool.map(_one, signals))
+        vecs = embeddings.embed_batch(texts, input_type=embeddings.PASSAGE)
     except Exception:
         log.warning("narratives: embedding pass failed", exc_info=True)
-        for s in signals:
-            s.setdefault("vec", None)
+        return
+    for s, vec in zip(signals, vecs):
+        s["vec"] = vec
 
 
 def _narrow(entities: list[str]) -> set[str]:
